@@ -9,6 +9,8 @@ export interface AppConfig {
   payoutReserveMinor: number;
   payoutMinMinor: number;
   payoutMaxAttempts: number;
+  payoutRetryBackoffMs: number;
+  schedulersEnabled: boolean;
   webhookToleranceSeconds: number;
   webhookMaxAttempts: number;
   webhookBackoffMs: number;
@@ -41,6 +43,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     payoutReserveMinor: int(env.PAYOUT_RESERVE_MINOR, 500),
     payoutMinMinor: int(env.PAYOUT_MIN_MINOR, 100),
     payoutMaxAttempts: int(env.PAYOUT_MAX_ATTEMPTS, 3),
+    payoutRetryBackoffMs: int(env.PAYOUT_RETRY_BACKOFF_MS, 60_000),
+    schedulersEnabled: env.SCHEDULERS_ENABLED !== 'false',
     webhookToleranceSeconds: int(env.WEBHOOK_TOLERANCE_SECONDS, 300),
     webhookMaxAttempts: int(env.WEBHOOK_MAX_ATTEMPTS, 5),
     webhookBackoffMs: int(env.WEBHOOK_BACKOFF_MS, 1000),
