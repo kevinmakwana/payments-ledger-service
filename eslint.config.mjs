@@ -11,6 +11,11 @@ export default tseslint.config(
     },
   },
   {
+    // Tests and the demo script read loosely-typed JSON responses.
+    files: ['test/**/*.ts', 'src/demo/*.ts'],
+    rules: { '@typescript-eslint/no-explicit-any': 'off' },
+  },
+  {
     // Third-party provider payloads are untyped JSON; narrowing every field adds noise, not safety.
     files: ['src/providers/*.provider.ts'],
     rules: { '@typescript-eslint/no-explicit-any': 'off' },

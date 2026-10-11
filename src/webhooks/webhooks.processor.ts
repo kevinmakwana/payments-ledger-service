@@ -43,6 +43,15 @@ export class WebhooksProcessor extends WorkerHost {
   @OnWorkerEvent('failed')
   async onFailed(job: Job<WebhookJob> | undefined, err: Error): Promise<void> {
     if (!job) return;
+    try {
+      await this.recordFailure(job, err);
+    } catch (e) {
+      // Never let bookkeeping errors escape an event listener (e.g. DB closed during shutdown).
+      this.logger.error(`Could not record webhook failure for ${job.data.provider}/${job.data.eventId}: ${e}`);
+    }
+  }
+
+  private async recordFailure(job: Job<WebhookJob>, err: Error): Promise<void> {
     const { provider, eventId } = job.data;
     await this.db.query('UPDATE webhook_events SET last_error = $3 WHERE provider = $1 AND event_id = $2', [provider, eventId, err.message]);
     const maxAttempts = job.opts.attempts ?? 1;
