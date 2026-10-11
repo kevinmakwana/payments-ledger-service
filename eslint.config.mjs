@@ -10,4 +10,9 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
     },
   },
+  {
+    // Third-party provider payloads are untyped JSON; narrowing every field adds noise, not safety.
+    files: ['src/providers/*.provider.ts'],
+    rules: { '@typescript-eslint/no-explicit-any': 'off' },
+  },
 );

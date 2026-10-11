@@ -42,7 +42,7 @@ export class SimulatedProvider implements PaymentProvider {
     await Promise.all([...this.pending]);
   }
 
-  async authorize(req: AuthorizeRequest): Promise<{ providerRef: string }> {
+  async authorize(_req: AuthorizeRequest): Promise<{ providerRef: string }> {
     return { providerRef: `sim_ch_${randomUUID()}` };
   }
 
