@@ -16,8 +16,7 @@ export class LedgerController {
   @Get('accounts/:code')
   @ApiOperation({ summary: 'Balance of one account (cached and derived from postings)' })
   async account(@Param('code') code: string) {
-    const tb = await this.ledger.trialBalance();
-    const account = tb.accounts.find((a) => a.code === code);
+    const account = await this.ledger.accountView(code);
     if (!account) throw new NotFoundException(`No account ${code}`);
     return account;
   }

@@ -15,6 +15,19 @@ export interface AppConfig {
   webhookMaxAttempts: number;
   webhookBackoffMs: number;
   simulatedWebhookSecret: string;
+  /** Upper bound for one provider HTTP call (request + response body). */
+  providerTimeoutMs: number;
+  /** Per-dependency deadline for /health/ready. */
+  healthCheckTimeoutMs: number;
+  /** If set, every alert is also POSTed here as JSON (Slack-compatible incoming webhook, PagerDuty relay, ...). */
+  alertWebhookUrl?: string;
+  alertTimeoutMs: number;
+  /** Dead-lettered webhook events at or above this count trigger an alert. */
+  alertDlqThreshold: number;
+  /** Cron (UTC) for the monitor job that checks DLQ depth and ledger drift. */
+  monitorCron: string;
+  stripeApiBase: string;
+  razorpayApiBase: string;
   stripeSecretKey?: string;
   stripeWebhookSecret?: string;
   razorpayKeyId?: string;
@@ -49,6 +62,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     webhookMaxAttempts: int(env.WEBHOOK_MAX_ATTEMPTS, 5),
     webhookBackoffMs: int(env.WEBHOOK_BACKOFF_MS, 1000),
     simulatedWebhookSecret: env.SIMULATED_WEBHOOK_SECRET ?? 'whsec_simulated_dev',
+    providerTimeoutMs: int(env.PROVIDER_TIMEOUT_MS, 15_000),
+    healthCheckTimeoutMs: int(env.HEALTH_CHECK_TIMEOUT_MS, 2000),
+    alertWebhookUrl: env.ALERT_WEBHOOK_URL || undefined,
+    alertTimeoutMs: int(env.ALERT_TIMEOUT_MS, 5000),
+    alertDlqThreshold: int(env.ALERT_DLQ_THRESHOLD, 1),
+    monitorCron: env.MONITOR_CRON || '*/15 * * * *',
+    stripeApiBase: env.STRIPE_API_BASE || 'https://api.stripe.com/v1',
+    razorpayApiBase: env.RAZORPAY_API_BASE || 'https://api.razorpay.com/v1',
     stripeSecretKey: env.STRIPE_SECRET_KEY || undefined,
     stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET || undefined,
     razorpayKeyId: env.RAZORPAY_KEY_ID || undefined,

@@ -1,6 +1,7 @@
 import { InjectQueue, OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job, Queue } from 'bullmq';
+import { AlertService } from '../alerts/alert.service';
 import { WEBHOOK_DLQ, WEBHOOK_QUEUE } from '../common/queues';
 import { DbService } from '../db/db.service';
 import { WebhookEvent } from '../providers/provider.interface';
@@ -18,6 +19,7 @@ export class WebhooksProcessor extends WorkerHost {
   constructor(
     private readonly db: DbService,
     private readonly handlers: WebhookHandlers,
+    private readonly alerts: AlertService,
     @InjectQueue(WEBHOOK_DLQ) private readonly dlq: Queue,
   ) {
     super();
@@ -62,5 +64,11 @@ export class WebhooksProcessor extends WorkerHost {
     this.logger.error(`Webhook ${provider}/${eventId} exhausted ${maxAttempts} attempts; moving to dead-letter queue`);
     await this.db.query(`UPDATE webhook_events SET status = 'dead' WHERE provider = $1 AND event_id = $2`, [provider, eventId]);
     await this.dlq.add('dead', { ...job.data, error: err.message, attempts: job.attemptsMade }, { removeOnComplete: false });
+    await this.alerts.raise({
+      kind: 'webhook_dead_lettered',
+      severity: 'warning',
+      message: `Webhook ${provider}/${eventId} was dead-lettered after ${job.attemptsMade} attempts: ${err.message}`,
+      details: { provider, eventId, attempts: job.attemptsMade, error: err.message },
+    });
   }
 }
