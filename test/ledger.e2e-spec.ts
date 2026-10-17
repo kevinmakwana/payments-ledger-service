@@ -1,5 +1,6 @@
 import fc from 'fast-check';
 import { PoolClient } from 'pg';
+import { LedgerService } from '../src/ledger/ledger.service';
 import { describeE2E, key, newPayment, resetDb, startApp, TestApp } from './helpers';
 
 describeE2E('ledger (e2e, real Postgres + Redis)', () => {
@@ -91,5 +92,42 @@ describeE2E('ledger (e2e, real Postgres + Redis)', () => {
     expect(await bal('platform:clearing:USD')).toBe(0);
     expect(await bal('seller:split_seller:USD')).toBe(0);
     expect(await bal('platform:fees:USD')).toBe(0);
+  });
+
+  describe('GET /ledger/accounts/:code', () => {
+    beforeEach(async () => {
+      await t.drain();
+      await resetDb(t.db);
+    });
+    const account = (code: string) => t.call('GET', `/ledger/accounts/${code}`);
+
+    it('returns one account with its balance in the natural direction and a consistent cache', async () => {
+      await t.call('POST', '/payments', newPayment({ sellerId: 'acct_view', amount: 10000, capture: true }), { 'idempotency-key': key() });
+      const res = await account('seller:acct_view:USD');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ code: 'seller:acct_view:USD', type: 'liability', currency: 'USD', balance: 9000, cacheConsistent: true });
+    });
+
+    it('returns 404 for an account that does not exist', async () => {
+      expect((await account('seller:nobody:USD')).status).toBe(404);
+    });
+
+    it('flags only the drifted account, not its neighbours', async () => {
+      await t.call('POST', '/payments', newPayment({ sellerId: 'acct_drift', amount: 10000, capture: true }), { 'idempotency-key': key() });
+      await t.db.query(`UPDATE account_balances SET balance = balance + 5 WHERE account_id = (SELECT id FROM accounts WHERE code = 'seller:acct_drift:USD')`);
+      expect((await account('seller:acct_drift:USD')).body).toMatchObject({ cacheConsistent: false });
+      expect((await account('platform:fees:USD')).body).toMatchObject({ cacheConsistent: true });
+    });
+
+    it('does not compute the full trial balance to answer', async () => {
+      await t.call('POST', '/payments', newPayment({ sellerId: 'acct_fast', amount: 10000, capture: true }), { 'idempotency-key': key() });
+      const spy = jest.spyOn(LedgerService.prototype, 'trialBalance');
+      try {
+        expect((await account('seller:acct_fast:USD')).status).toBe(200);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });

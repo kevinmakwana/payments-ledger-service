@@ -130,6 +130,28 @@ export class LedgerService {
     return r.rows[0] ? naturalBalance(r.rows[0].type, r.rows[0].total) : 0;
   }
 
+  /** One account with its derived balance and whether the cached balance agrees; undefined if it does not exist. */
+  async accountView(code: string, client: Queryable = this.db.pool) {
+    const r = await client.query<{ code: string; type: AccountType; currency: string; cached: number; derived: number }>(
+      `SELECT a.code, a.type, a.currency, b.balance AS cached, COALESCE(sum(p.amount), 0) AS derived
+         FROM accounts a
+         JOIN account_balances b ON b.account_id = a.id
+         LEFT JOIN postings p ON p.account_id = a.id
+        WHERE a.code = $1
+        GROUP BY a.code, a.type, a.currency, b.balance`,
+      [code],
+    );
+    const a = r.rows[0];
+    if (!a) return undefined;
+    return {
+      code: a.code,
+      type: a.type,
+      currency: a.currency.trim(),
+      balance: naturalBalance(a.type, a.derived),
+      cacheConsistent: a.cached === a.derived,
+    };
+  }
+
   /** All accounts with cached + derived balances, and per-currency totals that must be zero. */
   async trialBalance(client: Queryable = this.db.pool) {
     const accounts = await client.query<{

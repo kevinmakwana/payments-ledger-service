@@ -7,9 +7,8 @@ import {
   WebhookEvent,
   WebhookVerificationError,
 } from './provider.interface';
+import { MAX_LIST_PAGES, ProviderResponse, providerRequest } from './http';
 import { headerValue, verifyTimestamped } from './signature';
-
-const API = 'https://api.stripe.com/v1';
 
 /**
  * Stripe Connect driver (separate charges and transfers). Same interface as the simulator;
@@ -50,30 +49,41 @@ export class StripeProvider implements PaymentProvider {
     return { refundRef: r.id as string };
   }
 
-  async createPayout(req: { payoutId: string; sellerId: string; amount: number; currency: string }) {
+  async createPayout(req: { payoutId: string; sellerId: string; amount: number; currency: string; attempt: number }) {
     const t = await this.post('/transfers', {
       amount: req.amount,
       currency: req.currency.toLowerCase(),
       destination: req.sellerId,
       'metadata[payout_id]': req.payoutId,
-    }, `po_${req.payoutId}`);
+    }, `po_${req.payoutId}_${req.attempt}`); // per attempt: Stripe replays the saved result of a reused key, even a failed one
     return { payoutRef: t.id as string };
   }
 
   async listTransactions(date: string): Promise<ProviderTransaction[]> {
     const start = Math.floor(Date.parse(`${date}T00:00:00Z`) / 1000);
-    const q = new URLSearchParams({ 'created[gte]': String(start), 'created[lt]': String(start + 86400), limit: '100' });
-    const res = await this.get(`/balance_transactions?${q}`);
     const kinds: Record<string, ProviderTransaction['type']> = { charge: 'charge', payment: 'charge', refund: 'refund', transfer: 'payout' };
-    return (res.data as Record<string, any>[])
-      .filter((t) => kinds[t.type])
-      .map((t) => ({
-        id: t.source as string,
-        type: kinds[t.type],
-        amount: Math.abs(t.amount as number),
-        currency: String(t.currency).toUpperCase(),
-        createdAt: new Date((t.created as number) * 1000).toISOString(),
-      }));
+    const out: ProviderTransaction[] = [];
+    let startingAfter: string | undefined;
+    // Cursor pagination: a page holds at most 100 objects, `has_more` says whether another follows.
+    for (let page = 1; ; page++) {
+      if (page > MAX_LIST_PAGES) throw new Error(`Stripe returned more than ${MAX_LIST_PAGES} pages of balance transactions for ${date}`);
+      const q = new URLSearchParams({ 'created[gte]': String(start), 'created[lt]': String(start + 86400), limit: '100' });
+      if (startingAfter) q.set('starting_after', startingAfter);
+      const res = await this.get(`/balance_transactions?${q}`);
+      const data = res.data as Record<string, any>[];
+      for (const t of data) {
+        if (!kinds[t.type]) continue;
+        out.push({
+          id: t.source as string,
+          type: kinds[t.type],
+          amount: Math.abs(t.amount as number),
+          currency: String(t.currency).toUpperCase(),
+          createdAt: new Date((t.created as number) * 1000).toISOString(),
+        });
+      }
+      if (!res.has_more || data.length === 0) return out;
+      startingAfter = data[data.length - 1].id as string;
+    }
   }
 
   parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, nowSeconds = Math.floor(Date.now() / 1000)): WebhookEvent {
@@ -115,16 +125,15 @@ export class StripeProvider implements PaymentProvider {
 
   private async post(path: string, form: Record<string, string | number | boolean>, idempotencyKey: string) {
     const body = new URLSearchParams(Object.entries(form).map(([k, v]): [string, string] => [k, String(v)]));
-    return this.handle(await fetch(API + path, { method: 'POST', headers: this.headers(idempotencyKey), body }));
+    return this.handle(await providerRequest(this.name, this.config.stripeApiBase + path, { method: 'POST', headers: this.headers(idempotencyKey), body }, this.config.providerTimeoutMs));
   }
 
   private async get(path: string) {
-    return this.handle(await fetch(API + path, { headers: this.headers() }));
+    return this.handle(await providerRequest(this.name, this.config.stripeApiBase + path, { headers: this.headers() }, this.config.providerTimeoutMs));
   }
 
-  private async handle(res: Response): Promise<Record<string, any>> {
-    const json = (await res.json()) as Record<string, any>;
-    if (!res.ok) throw new Error(`Stripe ${res.status}: ${json.error?.message ?? 'request failed'}`);
-    return json;
+  private handle(res: ProviderResponse): Record<string, any> {
+    if (!res.ok) throw new Error(`Stripe ${res.status}: ${res.json.error?.message ?? 'request failed'}`);
+    return res.json;
   }
 }

@@ -107,6 +107,8 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 | GET | `/reports/reconciliation?date=YYYY-MM-DD` | Provider vs ledger mismatch report for a UTC day. |
 | GET | `/ledger/trial-balance` | All balances plus proof that postings sum to zero. |
 | GET | `/ledger/accounts/:code` | One account's balance (cached and derived). |
+| GET | `/health/live` | Liveness: the process is serving. Never touches dependencies. |
+| GET | `/health/ready`, `/health` | Readiness: `200` when Postgres and Redis answer, `503` with per-dependency `up`/`down` otherwise. |
 
 ## Correctness guarantees
 
@@ -138,6 +140,19 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 
 **Known simplifications** (deliberate, see Next steps): the provider call happens inside the DB transaction (a crash between a provider success and our commit is exactly what reconciliation exists to catch); a refund can drive a seller balance negative after payout; a single provider fee model; reconciliation buckets by UTC day of creation, so events near midnight can show as one-day timing differences.
 
+## Operations
+
+- **Health:** point liveness probes at `/health/live` and readiness probes at `/health/ready`. A dependency outage fails readiness (traffic stops) but not liveness (no restart loop). Responses say which dependency is down, never why; the reason is in the logs.
+- **Provider timeouts:** every Stripe/Razorpay call has a deadline (`PROVIDER_TIMEOUT_MS`, default 15 s) covering the connection and the response body. Provider calls run inside DB transactions, so a hung provider would otherwise hold row locks and pool connections. A timeout returns `504 provider_timeout` and rolls back; retrying with the same `Idempotency-Key` is safe.
+- **Alerts:** every alert is logged as one `ALERT {json}` error line and, if `ALERT_WEBHOOK_URL` is set, POSTed as JSON (`service`, `at`, `kind`, `severity`, `message`, `details`). Alerting never fails or stalls the job that raised it. Kinds:
+  - `reconciliation_mismatch` (critical): the nightly reconciliation found mismatches.
+  - `webhook_dead_lettered` (warning): an event exhausted its retries.
+  - `webhook_dlq_depth` (warning): dead letters at or above `ALERT_DLQ_THRESHOLD`.
+  - `ledger_drift` (critical): cached balances disagree with postings, or postings do not sum to zero.
+
+  The last two come from a monitor job (`MONITOR_CRON`, default every 15 minutes, UTC) that runs on the same shared schedule as the other jobs.
+- **Reconciliation listings are paginated** against Stripe (`starting_after`) and Razorpay (`skip`/`count`). A day with more than 500 pages fails loudly instead of being silently truncated.
+
 ## Testing
 
 ```bash
@@ -167,14 +182,16 @@ The Stripe and Razorpay drivers implement the same `PaymentProvider` interface a
 
 All via environment variables, see [.env.example](.env.example): fee (`PLATFORM_FEE_BPS`), `PAYOUT_HOLD_DAYS`, `PAYOUT_RESERVE_MINOR`, `PAYOUT_MIN_MINOR`, `PAYOUT_MAX_ATTEMPTS`, webhook tolerance / attempts / backoff, and `SCHEDULERS_ENABLED`.
 
+Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
+
 ## Next steps
 
 - Transactional outbox for provider calls (authorize/capture outside the DB transaction, reconciled via the outbox state)
 - Multi-currency payouts and FX postings; per-seller reserve policies
 - Chargebacks/disputes as ledger events; negative-balance recovery
 - Auth (API keys / OAuth) and per-tenant rate limiting; admin-only access to payout and DLQ endpoints
-- Persisted reconciliation reports with alerting and auto-matching of late webhooks
-- Metrics and tracing (queue depth, DLQ size, ledger drift)
+- Reconciliation: a mismatch resolution workflow and auto-matching of late webhooks (reports are already persisted per provider and day, and mismatches raise an alert)
+- Metrics and tracing (queue depth, DLQ size, ledger drift); DLQ depth and ledger drift already alert through the monitor job
 
 ## License
 

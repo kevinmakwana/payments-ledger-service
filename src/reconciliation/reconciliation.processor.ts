@@ -1,6 +1,7 @@
 import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, Logger, OnModuleInit } from '@nestjs/common';
 import { Job, Queue } from 'bullmq';
+import { AlertService } from '../alerts/alert.service';
 import { RECONCILIATION_QUEUE } from '../common/queues';
 import { APP_CONFIG, AppConfig } from '../config/config';
 import { ReconciliationService } from './reconciliation.service';
@@ -12,6 +13,7 @@ export class ReconciliationProcessor extends WorkerHost implements OnModuleInit 
 
   constructor(
     private readonly reconciliation: ReconciliationService,
+    private readonly alerts: AlertService,
     @InjectQueue(RECONCILIATION_QUEUE) private readonly queue: Queue,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {
@@ -28,6 +30,12 @@ export class ReconciliationProcessor extends WorkerHost implements OnModuleInit 
     const report = await this.reconciliation.reconcile((job.data?.date as string | undefined) ?? yesterday);
     if (report.summary.mismatches > 0) {
       this.logger.error(`Reconciliation ${report.date}: ${report.summary.mismatches} mismatch(es)`);
+      await this.alerts.raise({
+        kind: 'reconciliation_mismatch',
+        severity: 'critical',
+        message: `Reconciliation for ${report.date} found ${report.summary.mismatches} mismatch(es) between ${report.provider} and the ledger`,
+        details: { provider: report.provider, date: report.date, ...report.summary, sample: report.mismatches.slice(0, 5) },
+      });
     } else {
       this.logger.log(`Reconciliation ${report.date}: ${report.summary.matched} transactions matched`);
     }

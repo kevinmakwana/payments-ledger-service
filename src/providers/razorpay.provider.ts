@@ -7,9 +7,8 @@ import {
   WebhookEvent,
   WebhookVerificationError,
 } from './provider.interface';
+import { MAX_LIST_PAGES, providerRequest } from './http';
 import { assertWithinTolerance, headerValue, verifyPlainHmac } from './signature';
-
-const API = 'https://api.razorpay.com/v1';
 
 /**
  * Razorpay driver. The buyer pays in Checkout, so `paymentMethod` carries the resulting
@@ -61,13 +60,25 @@ export class RazorpayProvider implements PaymentProvider {
 
   async listTransactions(date: string): Promise<ProviderTransaction[]> {
     const from = Math.floor(Date.parse(`${date}T00:00:00Z`) / 1000);
-    const q = `from=${from}&to=${from + 86399}&count=100`;
-    const [payments, refunds] = await Promise.all([this.call('GET', `/payments?${q}`), this.call('GET', `/refunds?${q}`)]);
-    const captured = (payments.items as Record<string, any>[]).filter((p) => p.captured);
+    const range = `from=${from}&to=${from + 86399}`;
+    const [payments, refunds] = await Promise.all([this.listAll('/payments', range), this.listAll('/refunds', range)]);
     return [
-      ...captured.map((p) => ({ id: p.id, type: 'charge' as const, amount: p.amount, currency: p.currency, createdAt: new Date(p.created_at * 1000).toISOString() })),
-      ...(refunds.items as Record<string, any>[]).map((r) => ({ id: r.id, type: 'refund' as const, amount: r.amount, currency: r.currency, parentRef: r.payment_id, createdAt: new Date(r.created_at * 1000).toISOString() })),
+      ...payments.filter((p) => p.captured).map((p) => ({ id: p.id, type: 'charge' as const, amount: p.amount, currency: p.currency, createdAt: new Date(p.created_at * 1000).toISOString() })),
+      ...refunds.map((r) => ({ id: r.id, type: 'refund' as const, amount: r.amount, currency: r.currency, parentRef: r.payment_id, createdAt: new Date(r.created_at * 1000).toISOString() })),
     ];
+  }
+
+  /** Offset pagination: keep requesting `count`-sized pages until one comes back short. */
+  private async listAll(path: string, query: string): Promise<Record<string, any>[]> {
+    const count = 100;
+    const items: Record<string, any>[] = [];
+    for (let page = 0; ; page++) {
+      if (page >= MAX_LIST_PAGES) throw new Error(`Razorpay returned more than ${MAX_LIST_PAGES} pages for ${path}?${query}`);
+      const res = await this.call('GET', `${path}?${query}&count=${count}&skip=${page * count}`);
+      const batch = res.items as Record<string, any>[];
+      items.push(...batch);
+      if (batch.length < count) return items;
+    }
   }
 
   parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, nowSeconds = Math.floor(Date.now() / 1000)): WebhookEvent {
@@ -104,16 +115,20 @@ export class RazorpayProvider implements PaymentProvider {
   private async call(method: 'GET' | 'POST', path: string, body?: Record<string, unknown>): Promise<Record<string, any>> {
     const { razorpayKeyId, razorpayKeySecret } = this.config;
     if (!razorpayKeyId || !razorpayKeySecret) throw new Error('RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not configured');
-    const res = await fetch(API + path, {
-      method,
-      headers: {
-        authorization: `Basic ${Buffer.from(`${razorpayKeyId}:${razorpayKeySecret}`).toString('base64')}`,
-        'content-type': 'application/json',
+    const res = await providerRequest(
+      this.name,
+      this.config.razorpayApiBase + path,
+      {
+        method,
+        headers: {
+          authorization: `Basic ${Buffer.from(`${razorpayKeyId}:${razorpayKeySecret}`).toString('base64')}`,
+          'content-type': 'application/json',
+        },
+        body: body ? JSON.stringify(body) : undefined,
       },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const json = (await res.json()) as Record<string, any>;
-    if (!res.ok) throw new Error(`Razorpay ${res.status}: ${json.error?.description ?? 'request failed'}`);
-    return json;
+      this.config.providerTimeoutMs,
+    );
+    if (!res.ok) throw new Error(`Razorpay ${res.status}: ${res.json.error?.description ?? 'request failed'}`);
+    return res.json;
   }
 }
