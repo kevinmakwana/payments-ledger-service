@@ -1,8 +1,12 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
+import { Public } from '../auth/auth.decorators';
 import { HealthService } from './health.service';
 
 @ApiExcludeController()
+@Public()
+@SkipThrottle() // probes poll constantly and must never be rate-limited
 @Controller('health')
 export class HealthController {
   constructor(private readonly health: HealthService) {}

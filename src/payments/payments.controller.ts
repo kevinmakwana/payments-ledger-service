@@ -40,9 +40,19 @@ export class PaymentsController {
 
   @Post(':id/capture')
   @HttpCode(200)
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description: 'Optional. A retry with the same key replays the first response instead of failing with 409.',
+  })
   @ApiOperation({ summary: 'Capture an authorized payment and post the fee split to the ledger' })
-  capture(@Param('id', ParseUUIDPipe) id: string) {
-    return this.payments.capture(id);
+  async capture(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Headers('idempotency-key') key: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (key === undefined) return this.payments.capture(id);
+    return this.respond(res, await this.payments.capture(id, requireKey(key)));
   }
 
   @Post(':id/refunds')

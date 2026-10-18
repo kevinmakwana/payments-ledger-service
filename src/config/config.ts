@@ -1,4 +1,8 @@
+import { ApiKey, parseApiKeys } from '../auth/api-keys';
+
 export interface AppConfig {
+  /** Configured API keys; empty means authentication is disabled (never allowed in production by default). */
+  apiKeys: ApiKey[];
   port: number;
   databaseUrl: string;
   redisUrl: string;
@@ -11,6 +15,25 @@ export interface AppConfig {
   payoutMaxAttempts: number;
   payoutRetryBackoffMs: number;
   schedulersEnabled: boolean;
+  /** Idempotency keys older than this are deleted; a client reusing a key after this window would create a duplicate. */
+  idempotencyKeyTtlHours: number;
+  /** Processed webhook events older than this are deleted (received and dead-lettered events are never purged). */
+  webhookRetentionDays: number;
+  /** Cron (UTC) for the retention job. */
+  maintenanceCron: string;
+  /** Requests allowed per client IP per window before answering 429. Counted per instance. */
+  rateLimitMax: number;
+  rateLimitWindowMs: number;
+  /** Largest accepted JSON request body (express/body-parser syntax, e.g. "256kb"). */
+  bodyLimit: string;
+  /** Number of reverse-proxy hops to trust for the client IP (X-Forwarded-For); unset = none. */
+  trustProxy?: number;
+  /** A pending payout with no provider ref untouched this long is considered orphaned and re-dispatched. Keep well above PAYOUT_RETRY_BACKOFF_MS. */
+  payoutStaleMs: number;
+  /** A payout the provider accepted but never reported on for this long raises an alert. */
+  payoutAwaitingProviderMs: number;
+  /** Cron (UTC) for the payout sweeper. */
+  payoutSweepCron: string;
   webhookToleranceSeconds: number;
   webhookMaxAttempts: number;
   webhookBackoffMs: number;
@@ -45,7 +68,12 @@ const int = (v: string | undefined, d: number): number => {
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const apiKeys = parseApiKeys(env.API_KEYS);
+  if (apiKeys.length === 0 && env.NODE_ENV === 'production' && env.ALLOW_UNAUTHENTICATED !== 'true') {
+    throw new Error('API_KEYS must be set in production (set ALLOW_UNAUTHENTICATED=true only to run an open API on purpose)');
+  }
   return {
+    apiKeys,
     port: int(env.PORT, 3000),
     databaseUrl: env.DATABASE_URL ?? 'postgres://ledger:ledger@localhost:5432/ledger',
     redisUrl: env.REDIS_URL ?? 'redis://localhost:6379',
@@ -58,6 +86,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     payoutMaxAttempts: int(env.PAYOUT_MAX_ATTEMPTS, 3),
     payoutRetryBackoffMs: int(env.PAYOUT_RETRY_BACKOFF_MS, 60_000),
     schedulersEnabled: env.SCHEDULERS_ENABLED !== 'false',
+    idempotencyKeyTtlHours: int(env.IDEMPOTENCY_KEY_TTL_HOURS, 168),
+    webhookRetentionDays: int(env.WEBHOOK_RETENTION_DAYS, 30),
+    maintenanceCron: env.MAINTENANCE_CRON || '0 4 * * *',
+    rateLimitMax: int(env.RATE_LIMIT_MAX, 300),
+    rateLimitWindowMs: int(env.RATE_LIMIT_WINDOW_MS, 60_000),
+    bodyLimit: env.BODY_LIMIT || '256kb',
+    trustProxy: env.TRUST_PROXY ? int(env.TRUST_PROXY, 0) : undefined,
+    payoutStaleMs: int(env.PAYOUT_STALE_MS, 30 * 60_000),
+    payoutAwaitingProviderMs: int(env.PAYOUT_AWAITING_PROVIDER_MS, 24 * 3_600_000),
+    payoutSweepCron: env.PAYOUT_SWEEP_CRON || '*/10 * * * *',
     webhookToleranceSeconds: int(env.WEBHOOK_TOLERANCE_SECONDS, 300),
     webhookMaxAttempts: int(env.WEBHOOK_MAX_ATTEMPTS, 5),
     webhookBackoffMs: int(env.WEBHOOK_BACKOFF_MS, 1000),

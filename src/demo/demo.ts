@@ -6,6 +6,7 @@
 import { NestFactory } from '@nestjs/core';
 import { randomUUID } from 'crypto';
 import { AppModule } from '../app.module';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { configureApp } from '../app.setup';
 import { DbService } from '../db/db.service';
 import { SimulatedProvider } from '../providers/simulated.provider';
@@ -23,7 +24,7 @@ const title = (s: string) => console.log(`\n\x1b[1m\x1b[36m== ${s}\x1b[0m`);
 const ok = (s: string) => console.log(`  \x1b[32m✔\x1b[0m ${s}`);
 
 async function main() {
-  const app = await NestFactory.create(AppModule, { rawBody: true, logger: ['error'] });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, logger: ['error'] });
   configureApp(app);
   await app.listen(0);
   const url = (await app.getUrl()).replace('[::1]', '127.0.0.1');

@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { configureApp } from './app.setup';
 import { loadConfig } from './config/config';
@@ -7,7 +8,7 @@ import { SimulatedProvider } from './providers/simulated.provider';
 
 async function bootstrap() {
   // rawBody is required: webhook HMACs are computed over the exact bytes received.
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
   configureApp(app);
   app.enableShutdownHooks();
   const { port } = loadConfig();

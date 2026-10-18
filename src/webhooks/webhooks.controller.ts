@@ -2,7 +2,9 @@ import {
   BadRequestException, Controller, Get, HttpCode, Param, Post, Req, UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import type { Request } from 'express';
+import { AdminOnly, Public } from '../auth/auth.decorators';
 import { WebhookVerificationError } from '../providers/provider.interface';
 import { ProviderRegistry } from '../providers/provider.registry';
 import { WebhooksService } from './webhooks.service';
@@ -16,6 +18,8 @@ export class WebhooksController {
   ) {}
 
   @Post(':provider')
+  @Public() // authenticated by the provider's signature, not by an API key
+  @SkipThrottle() // provider retries/bursts come from a few IPs; dropping them would lose events
   @HttpCode(202)
   @ApiOperation({
     summary: 'Receive a provider webhook',
@@ -42,12 +46,14 @@ export class WebhooksController {
   }
 
   @Get('dead-letters')
+  @AdminOnly()
   @ApiOperation({ summary: 'Webhook events that exhausted their retries' })
   deadLetters() {
     return this.webhooks.deadLetters();
   }
 
   @Post('dead-letters/:provider/:eventId/retry')
+  @AdminOnly()
   @HttpCode(202)
   @ApiOperation({ summary: 'Re-queue a dead-lettered webhook event' })
   retry(@Param('provider') provider: string, @Param('eventId') eventId: string) {

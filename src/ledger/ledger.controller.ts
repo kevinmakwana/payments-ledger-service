@@ -1,8 +1,10 @@
 import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { AdminOnly } from '../auth/auth.decorators';
 import { LedgerService } from './ledger.service';
 
 @ApiTags('ledger')
+@AdminOnly()
 @Controller('ledger')
 export class LedgerController {
   constructor(private readonly ledger: LedgerService) {}

@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { APP_CONFIG, AppConfig } from '../config/config';
 import {
   AuthorizeRequest,
@@ -45,7 +46,7 @@ export class RazorpayProvider implements PaymentProvider {
     return { refundRef: r.id as string };
   }
 
-  async createPayout(req: { payoutId: string; sellerId: string; amount: number; currency: string }) {
+  async createPayout(req: { payoutId: string; sellerId: string; amount: number; currency: string; attempt: number }) {
     const r = await this.call('POST', '/payouts', {
       account_number: process.env.RAZORPAY_X_ACCOUNT_NUMBER,
       fund_account_id: req.sellerId,
@@ -54,6 +55,10 @@ export class RazorpayProvider implements PaymentProvider {
       mode: 'IMPS',
       purpose: 'payout',
       reference_id: req.payoutId,
+    }, {
+      // Mandatory since 15 Mar 2025. 4-36 chars of [A-Za-z0-9_- ], so a UUID + attempt will not fit: hash it.
+      // Per attempt for the same reason as Stripe (a reused key replays the earlier result); stable within an attempt.
+      'X-Payout-Idempotency': createHash('sha256').update(`${req.payoutId}:${req.attempt}`).digest('hex').slice(0, 32),
     });
     return { payoutRef: r.id as string };
   }
@@ -112,7 +117,7 @@ export class RazorpayProvider implements PaymentProvider {
     }
   }
 
-  private async call(method: 'GET' | 'POST', path: string, body?: Record<string, unknown>): Promise<Record<string, any>> {
+  private async call(method: 'GET' | 'POST', path: string, body?: Record<string, unknown>, extraHeaders: Record<string, string> = {}): Promise<Record<string, any>> {
     const { razorpayKeyId, razorpayKeySecret } = this.config;
     if (!razorpayKeyId || !razorpayKeySecret) throw new Error('RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not configured');
     const res = await providerRequest(
@@ -123,6 +128,7 @@ export class RazorpayProvider implements PaymentProvider {
         headers: {
           authorization: `Basic ${Buffer.from(`${razorpayKeyId}:${razorpayKeySecret}`).toString('base64')}`,
           'content-type': 'application/json',
+          ...extraHeaders,
         },
         body: body ? JSON.stringify(body) : undefined,
       },

@@ -4,11 +4,12 @@ import { Queue } from 'bullmq';
 import { PoolClient } from 'pg';
 import { PAYOUT_QUEUE } from '../common/queues';
 import { APP_CONFIG, AppConfig } from '../config/config';
+import { AlertService } from '../alerts/alert.service';
 import { DbService } from '../db/db.service';
 import { payoutInitiatedLines, payoutReversedLines, payoutSettledLines } from '../ledger/entries';
 import { LedgerService } from '../ledger/ledger.service';
 import { ProviderRegistry } from '../providers/provider.registry';
-import { holdCutoff, payableAmount, SellerBalanceParts } from './payout-math';
+import { allocateAcrossProviders, holdCutoff, payableAmount, SellerBalanceParts } from './payout-math';
 
 interface PayoutRow {
   id: string;
@@ -42,6 +43,8 @@ export interface BatchLine {
   reserve: number;
   payoutId?: string;
   payoutAmount?: number;
+  /** Provider this leg is paid through (absent when the seller had nothing payable at all). */
+  provider?: string;
   skipped?: string;
 }
 
@@ -55,6 +58,7 @@ export class PayoutsService {
     private readonly db: DbService,
     private readonly ledger: LedgerService,
     private readonly providers: ProviderRegistry,
+    private readonly alerts: AlertService,
     @InjectQueue(PAYOUT_QUEUE) private readonly queue: Queue,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
@@ -71,7 +75,32 @@ export class PayoutsService {
     return { maturedCredits: r.rows[0].matured, debits: r.rows[0].debits };
   }
 
-  /** Daily job: turn each seller's available balance into a pending payout. */
+  /**
+   * The same parts as `balanceParts`, split by the provider the money moved through: a sale or refund counts for the
+   * provider of its payment, a payout for the provider that carried it. Ledger entries tied to neither (manual
+   * adjustments) count for the default provider.
+   */
+  async balancePartsByProvider(client: Pick<PoolClient, 'query'>, accountId: string, cutoff: Date): Promise<Map<string, SellerBalanceParts>> {
+    const r = await client.query<{ provider: string; matured: number; debits: number }>(
+      `SELECT COALESCE(pa.provider, po.provider, $3) AS provider,
+              COALESCE(sum(-p.amount) FILTER (WHERE p.amount < 0 AND e.effective_at <= $2), 0) AS matured,
+              COALESCE(sum(p.amount)  FILTER (WHERE p.amount > 0), 0) AS debits
+         FROM postings p
+         JOIN journal_entries e ON e.id = p.entry_id
+         LEFT JOIN payments pa ON pa.id = e.payment_id
+         LEFT JOIN payouts po ON po.id = e.payout_id
+        WHERE p.account_id = $1
+        GROUP BY 1`,
+      [accountId, cutoff, this.config.defaultProvider],
+    );
+    return new Map(r.rows.map((row) => [row.provider, { maturedCredits: row.matured, debits: row.debits }]));
+  }
+
+  /**
+   * Daily job: turn each seller's available balance into pending payouts, one per provider that holds some of the
+   * money. The seller-level total (matured credits - debits - one reserve) is unchanged; only the routing is split,
+   * and a provider is never asked to pay out more than it took in for that seller.
+   */
   async runBatch(asOf: Date = new Date()): Promise<BatchLine[]> {
     const cutoff = holdCutoff(asOf, this.config.payoutHoldDays);
     const accounts = await this.db.query<{ id: string; code: string }>(
@@ -82,38 +111,58 @@ export class PayoutsService {
       const m = SELLER_CODE.exec(acct.code);
       if (!m) continue;
       const [, sellerId, currency] = m;
-      const { line, enqueue } = await this.db.tx(async (client) => {
+      const { sellerLines, enqueue } = await this.db.tx(async (client) => {
         // Serialize concurrent batches for this seller: lock the cached balance row first.
         await client.query('SELECT 1 FROM account_balances WHERE account_id = $1 FOR UPDATE', [acct.id]);
-        const parts = await this.balanceParts(client, acct.id, cutoff);
+        const byProvider = await this.balancePartsByProvider(client, acct.id, cutoff);
+        const parts = [...byProvider.values()].reduce(
+          (a, b) => ({ maturedCredits: a.maturedCredits + b.maturedCredits, debits: a.debits + b.debits }),
+          { maturedCredits: 0, debits: 0 },
+        );
         const reserve = this.config.payoutReserveMinor;
         const payable = payableAmount(parts, reserve);
         const base = { sellerId, currency, matured: parts.maturedCredits, debits: parts.debits, reserve };
         if (payable < Math.max(1, this.config.payoutMinMinor)) {
-          return { line: { ...base, skipped: payable === 0 ? 'nothing available (held, reserved or refunded)' : 'below minimum payout' }, enqueue: undefined };
+          return {
+            sellerLines: [{ ...base, skipped: payable === 0 ? 'nothing available (held, reserved or refunded)' : 'below minimum payout' }],
+            enqueue: [] as string[],
+          };
         }
-        const payout = await client.query<{ id: string }>(
-          `INSERT INTO payouts (seller_id, amount, currency, status, provider) VALUES ($1,$2,$3,'pending',$4) RETURNING id`,
-          [sellerId, payable, currency, this.config.defaultProvider],
-        );
-        const payoutId = payout.rows[0].id;
-        await this.ledger.post(client, {
-          kind: 'payout_initiated',
-          referenceKey: `payout:${payoutId}:initiated`,
-          payoutId,
-          description: `Payout ${payable} to ${sellerId}`,
-          lines: payoutInitiatedLines({ sellerId, currency, amount: payable }),
-        });
-        return { line: { ...base, payoutId, payoutAmount: payable }, enqueue: payoutId };
+        const caps = Object.fromEntries([...byProvider].map(([provider, p]) => [provider, p.maturedCredits - p.debits]));
+        const sellerLines: BatchLine[] = [];
+        const enqueue: string[] = [];
+        for (const leg of allocateAcrossProviders(payable, caps)) {
+          if (leg.amount < Math.max(1, this.config.payoutMinMinor)) {
+            sellerLines.push({ ...base, provider: leg.provider, skipped: 'below minimum payout' }); // stays for a later run
+            continue;
+          }
+          const payout = await client.query<{ id: string }>(
+            `INSERT INTO payouts (seller_id, amount, currency, status, provider) VALUES ($1,$2,$3,'pending',$4) RETURNING id`,
+            [sellerId, leg.amount, currency, leg.provider],
+          );
+          const payoutId = payout.rows[0].id;
+          await this.ledger.post(client, {
+            kind: 'payout_initiated',
+            referenceKey: `payout:${payoutId}:initiated`,
+            payoutId,
+            description: `Payout ${leg.amount} to ${sellerId} via ${leg.provider}`,
+            lines: payoutInitiatedLines({ sellerId, currency, amount: leg.amount }),
+          });
+          sellerLines.push({ ...base, provider: leg.provider, payoutId, payoutAmount: leg.amount });
+          enqueue.push(payoutId);
+        }
+        return { sellerLines, enqueue };
       });
-      lines.push(line);
-      if (enqueue) await this.enqueueDispatch(enqueue);
+      lines.push(...sellerLines);
+      for (const id of enqueue) await this.enqueueDispatch(id);
     }
     return lines;
   }
 
   enqueueDispatch(payoutId: string, delayMs = 0) {
-    // One in-flight dispatch per (payout, attempt): the jobId makes enqueueing idempotent.
+    // A fresh id each time on purpose: BullMQ silently ignores an add whose id already exists (even a
+    // finished or failed job), which would swallow a retry or a sweep. Duplicates are harmless:
+    // dispatch() re-checks status and provider_ref under the payout row lock.
     return this.queue.add('dispatch', { payoutId }, { jobId: `dispatch-${payoutId}-${Date.now()}`, delay: delayMs });
   }
 
@@ -173,6 +222,53 @@ export class PayoutsService {
       return undefined;
     });
     if (retryDelay !== undefined) await this.enqueueDispatch(payoutId, retryDelay);
+  }
+
+  /**
+   * Safety net for payouts the happy path lost track of:
+   *  - `pending` with no provider ref for longer than PAYOUT_STALE_MS: the batch committed but its
+   *    dispatch job was never enqueued (or died). Re-dispatch. Rows are claimed atomically by bumping
+   *    `updated_at`, so overlapping sweeps (or instances) never enqueue the same payout twice.
+   *  - `pending` WITH a provider ref for longer than PAYOUT_AWAITING_PROVIDER_MS: the provider took
+   *    the payout but never reported the outcome. Not re-dispatched (that could pay twice); alert a human.
+   */
+  async sweep(): Promise<{ redispatched: string[]; awaitingProvider: string[] }> {
+    const staleBefore = new Date(Date.now() - this.config.payoutStaleMs);
+    const claimed = await this.db.query<{ id: string }>(
+      `UPDATE payouts SET updated_at = now()
+        WHERE id IN (SELECT id FROM payouts
+                      WHERE status = 'pending' AND provider_ref IS NULL AND updated_at < $1
+                        FOR UPDATE SKIP LOCKED)
+        RETURNING id`,
+      [staleBefore],
+    );
+    const redispatched: string[] = [];
+    for (const { id } of claimed.rows.sort((a, b) => (a.id < b.id ? -1 : 1))) {
+      try {
+        await this.enqueueDispatch(id);
+        redispatched.push(id);
+      } catch (err) {
+        // Already claimed, so it is retried after the next stale window; keep sweeping the others.
+        this.logger.error(`Sweeper could not enqueue payout ${id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    const silentBefore = new Date(Date.now() - this.config.payoutAwaitingProviderMs);
+    const silent = await this.db.query<{ id: string }>(
+      `SELECT id FROM payouts WHERE status = 'pending' AND provider_ref IS NOT NULL AND updated_at < $1 ORDER BY updated_at, id`,
+      [silentBefore],
+    );
+    const awaitingProvider = silent.rows.map((r) => r.id);
+    if (awaitingProvider.length > 0) {
+      await this.alerts.raise({
+        kind: 'payout_awaiting_provider',
+        severity: 'critical',
+        message: `${awaitingProvider.length} payout(s) were accepted by the provider but no result arrived within ${Math.round(this.config.payoutAwaitingProviderMs / 3_600_000)}h; check the provider dashboard before retrying`,
+        details: { payoutIds: awaitingProvider.slice(0, 50), count: awaitingProvider.length },
+      });
+    }
+    if (redispatched.length > 0) this.logger.warn(`Sweeper re-dispatched ${redispatched.length} stale payout(s)`);
+    return { redispatched, awaitingProvider };
   }
 
   async get(id: string) {

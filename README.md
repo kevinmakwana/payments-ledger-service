@@ -96,7 +96,7 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 | --- | --- | --- |
 | POST | `/payments` | Create and authorize a payment, optionally `capture: true`. Requires `Idempotency-Key`. |
 | GET | `/payments/:id` | Fetch a payment. |
-| POST | `/payments/:id/capture` | Capture an authorized payment; posts the fee split to the ledger. |
+| POST | `/payments/:id/capture` | Capture an authorized payment; posts the fee split to the ledger. `Idempotency-Key` optional: with it, a retry replays the first response instead of returning `409`. |
 | POST | `/payments/:id/refunds` | Full or partial refund (`amount` optional). Requires `Idempotency-Key`. |
 | POST | `/webhooks/:provider` | Provider webhook intake (HMAC + timestamp tolerance, dedupe, async processing). |
 | GET | `/webhooks/dead-letters` | Events that exhausted their retries. |
@@ -135,10 +135,25 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 
 **Payouts and reconciliation**
 - Payable = credits older than the hold period − all debits − reserve, floored at zero. Concurrent batches serialize on the seller's balance row.
+- **Payouts go back out through the provider that took the money.** The seller-level total (and its single reserve) is unchanged, but it is split into one payout per provider, largest first, and a provider is never asked to pay out more than it took in for that seller (a refund counts against the provider of its payment, a payout against the provider that carried it). A leg below `PAYOUT_MIN_MINOR` is skipped and left for a later run. Note for existing databases: payouts created before this change were all attributed to the default provider, so on a database that already paid out money taken by another provider, the first run could pay that money out again; start from a clean ledger or reconcile first.
 - Payout state is `pending → paid | failed`; failed payouts retry with backoff, and permanent failure reverses the ledger entry so the money returns to the seller.
 - Reconciliation matches provider transactions to ledger entries by provider reference and reports `missing_in_ledger`, `missing_at_provider` and `amount_mismatch`.
 
 **Known simplifications** (deliberate, see Next steps): the provider call happens inside the DB transaction (a crash between a provider success and our commit is exactly what reconciliation exists to catch); a refund can drive a seller balance negative after payout; a single provider fee model; reconciliation buckets by UTC day of creation, so events near midnight can show as one-day timing differences.
+
+## Authentication
+
+Set `API_KEYS="<key>:<role>,<key>:<role>"` (keys of 16+ characters; roles `client` or `admin`) and every route requires `Authorization: Bearer <key>` (or `X-API-Key: <key>`). Comparison is constant-time. A malformed `API_KEYS` stops the app at startup.
+
+| Role | Can call |
+| --- | --- |
+| `client` | `/payments*`, `/sellers/:id/balance` |
+| `admin` | everything a client can, plus `/payouts*`, `/ledger/*`, `/reports/*`, `/webhooks/dead-letters*` |
+| *(no key needed)* | `/health/*`, `/docs`, and `POST /webhooks/:provider` (authenticated by the provider's HMAC signature) |
+
+Missing or unknown key: `401 {"code":"unauthorized"}`. Client key on an admin route: `403 {"code":"forbidden"}`.
+
+With `API_KEYS` unset, authentication is **off** and the app logs a warning at startup (this keeps `npm run demo` and local dev frictionless). With `NODE_ENV=production` the app refuses to start without keys unless you set `ALLOW_UNAUTHENTICATED=true` on purpose. Keys live in the environment for now; hashed, rotatable keys in the database are a natural next step.
 
 ## Operations
 
@@ -151,15 +166,23 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
   - `ledger_drift` (critical): cached balances disagree with postings, or postings do not sum to zero.
 
   The last two come from a monitor job (`MONITOR_CRON`, default every 15 minutes, UTC) that runs on the same shared schedule as the other jobs.
+- **Retention:** a daily job (`MAINTENANCE_CRON`, default 04:00 UTC) deletes, in small batches, idempotency keys older than `IDEMPOTENCY_KEY_TTL_HOURS` (default 168 = 7 days; a client reusing a key after that would create a duplicate, so keep it longer than any client retry window) and *processed* webhook events older than `WEBHOOK_RETENTION_DAYS` (default 30; far longer than providers retry deliveries, and handlers are idempotent anyway). Events still `received` or dead-lettered are never purged.
+- **Edge protection:** `helmet` security headers (CSP is off because this is a JSON API and Swagger UI needs inline scripts); JSON bodies over `BODY_LIMIT` (default `256kb`) get `413`; each client IP may make `RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW_MS` (default 300 per minute) before `429` with `Retry-After`. Limiting is keyed by IP, not API key, and runs *before* authentication, so guessing keys is throttled and presenting a different key never buys a fresh budget. `/health/*` and provider webhooks are exempt. Counters are in memory, so the limit is per instance; behind a load balancer set `TRUST_PROXY` to the number of proxy hops so the real client IP is used.
+- **Payout sweeper:** every `PAYOUT_SWEEP_CRON` (default 10 min) a job looks for payouts the happy path lost. A `pending` payout with no provider reference for longer than `PAYOUT_STALE_MS` (default 30 min; keep it well above `PAYOUT_RETRY_BACKOFF_MS`) had its dispatch job lost, so it is re-dispatched; rows are claimed atomically so overlapping sweeps cannot double-enqueue. A payout the provider accepted but never reported on for `PAYOUT_AWAITING_PROVIDER_MS` (default 24 h) raises a `payout_awaiting_provider` critical alert on every sweep until someone resolves it. It is deliberately not retried, because retrying could pay twice.
 - **Reconciliation listings are paginated** against Stripe (`starting_after`) and Razorpay (`skip`/`count`). A day with more than 500 pages fails loudly instead of being silently truncated.
 
 ## Testing
 
 ```bash
 npm test            # unit tests: state machine, signatures, payout math, reconciliation, ledger properties (no services needed)
-npm run test:e2e    # e2e against real Postgres + Redis; skipped unless DATABASE_URL and REDIS_URL are set
+npm run test:e2e    # e2e against real Postgres + Redis; skipped locally unless DATABASE_URL and REDIS_URL are set, but a hard FAILURE when CI=true
+npm run test:e2e:cov # e2e with a coverage gate (statements 80%, branches 60%, functions 80%, lines 82%; lcov in ./coverage)
 npm run typecheck && npm run lint && npm run build
 ```
+
+Coverage is measured on the e2e run, because that is the suite that exercises the real app (about 86% of statements; unit tests alone cover the pure logic, about 27%). CI fails below the gate and uploads the lcov report as an artifact. Raise the thresholds in `test/jest-e2e.json` as coverage grows.
+
+**Failure injection** (`test/failure-injection.e2e-spec.ts`) breaks a step of a flow and asserts what remains: a crash after the provider captured but before our commit rolls everything back, leaves the idempotency key reusable and shows up in reconciliation as `missing_in_ledger`; a refund that dies before commit changes nothing; provider errors and timeouts (`504`) leave no trace; a webhook that was stored but never enqueued is picked up by its redelivery. The "payout batch committed but its dispatch job was lost" crash is covered by the sweeper tests.
 
 Covered: ledger balance property tests (pure and over random capture/refund sequences against the DB), idempotency replay/conflict/concurrent duplicates, webhook signature, tolerance, dedupe, retry and dead-letter, state machine, payout calculation with holds and reserve, payout retry and reversal, reconciliation mismatches, and the parallel capture/refund concurrency tests.
 
@@ -168,13 +191,17 @@ POSTGRES_PORT=5442 REDIS_PORT=6390 docker compose up -d --wait
 DATABASE_URL=postgres://ledger:ledger@localhost:5442/ledger REDIS_URL=redis://localhost:6390 npm run test:e2e
 ```
 
+## Dependency audit
+
+`npm audit --omit=dev` is clean. `@nestjs/swagger@11.4.7` pins `js-yaml` 5.3.0, which has a moderate advisory (GHSA-r3ph-w7gj-g6xm, CPU use when *parsing* YAML merge keys). Swagger only calls `dump` on our own OpenAPI document, so it is not reachable, but `overrides` in `package.json` moves that one dependency to the patched 5.5.0 anyway, without the breaking Nest 12 upgrade `npm audit fix --force` would require. Drop the override when Swagger bumps its pin. The remaining `npm audit` findings are `js-yaml` 3.x inside Jest's coverage tooling (dev only, reads this repo's own config, no 3.x fix exists).
+
 ## Providers
 
 | Driver | Needs | Notes |
 | --- | --- | --- |
 | `simulated` (default) | nothing | Keeps its own books and delivers signed webhooks to `/webhooks/simulated`. Payouts for seller ids starting `fail_` always fail, `flaky_` fail once. |
 | `stripe` | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Connect: PaymentIntents with manual capture, Refunds, Transfers to `acct_…` sellers. |
-| `razorpay` | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | Verifies Checkout payments, captures, refunds, RazorpayX payouts. |
+| `razorpay` | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_X_ACCOUNT_NUMBER` (payouts) | Verifies Checkout payments, captures, refunds, RazorpayX payouts (with the mandatory `X-Payout-Idempotency` header, derived per payout attempt). |
 
 The Stripe and Razorpay drivers implement the same `PaymentProvider` interface and their signature/normalisation paths are unit-tested, but they have **not been exercised against the live APIs** (no keys in CI).
 
@@ -182,14 +209,14 @@ The Stripe and Razorpay drivers implement the same `PaymentProvider` interface a
 
 All via environment variables, see [.env.example](.env.example): fee (`PLATFORM_FEE_BPS`), `PAYOUT_HOLD_DAYS`, `PAYOUT_RESERVE_MINOR`, `PAYOUT_MIN_MINOR`, `PAYOUT_MAX_ATTEMPTS`, webhook tolerance / attempts / backoff, and `SCHEDULERS_ENABLED`.
 
-Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
+Auth: `API_KEYS`, `ALLOW_UNAUTHENTICATED`. Edge: `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `BODY_LIMIT`, `TRUST_PROXY`. Retention: `IDEMPOTENCY_KEY_TTL_HOURS`, `WEBHOOK_RETENTION_DAYS`, `MAINTENANCE_CRON`. Payout sweeper: `PAYOUT_STALE_MS`, `PAYOUT_AWAITING_PROVIDER_MS`, `PAYOUT_SWEEP_CRON`. Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
 
 ## Next steps
 
 - Transactional outbox for provider calls (authorize/capture outside the DB transaction, reconciled via the outbox state)
 - Multi-currency payouts and FX postings; per-seller reserve policies
 - Chargebacks/disputes as ledger events; negative-balance recovery
-- Auth (API keys / OAuth) and per-tenant rate limiting; admin-only access to payout and DLQ endpoints
+- Per-tenant API keys stored hashed in the database, key rotation, and a shared (Redis) rate-limit store
 - Reconciliation: a mismatch resolution workflow and auto-matching of late webhooks (reports are already persisted per provider and day, and mismatches raise an alert)
 - Metrics and tracing (queue depth, DLQ size, ledger drift); DLQ depth and ledger drift already alert through the monitor job
 

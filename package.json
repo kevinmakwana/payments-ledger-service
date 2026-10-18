@@ -16,7 +16,9 @@
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "test": "jest",
     "test:e2e": "jest --config test/jest-e2e.json --runInBand",
-    "demo": "ts-node src/demo/demo.ts"
+    "demo": "ts-node src/demo/demo.ts",
+    "test:cov": "jest --coverage --collectCoverageFrom='**/*.ts' --collectCoverageFrom='!**/*.spec.ts' --collectCoverageFrom='!demo/**'",
+    "test:e2e:cov": "jest --config test/jest-e2e.json --runInBand --coverage"
   },
   "dependencies": {
     "@nestjs/bullmq": "^11.0.5",
@@ -24,9 +26,11 @@
     "@nestjs/core": "^11.2.7",
     "@nestjs/platform-express": "^11.2.7",
     "@nestjs/swagger": "^11.4.7",
+    "@nestjs/throttler": "^6.7.1",
     "bullmq": "^6.3.12",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "helmet": "^8.3.0",
     "ioredis": "^5.11.1",
     "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
@@ -48,5 +52,10 @@
     "ts-node": "^10.9.2",
     "typescript": "5.9",
     "typescript-eslint": "^8.71.1"
+  },
+  "overrides": {
+    "@nestjs/swagger": {
+      "js-yaml": "^5.5.0"
+    }
   }
 }

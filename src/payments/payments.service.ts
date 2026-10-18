@@ -5,7 +5,7 @@ import { InvalidAmountError } from '../common/errors';
 import { cumulativeFeeRefund, feeFor } from '../common/money';
 import { APP_CONFIG, AppConfig } from '../config/config';
 import { DbService } from '../db/db.service';
-import { IdempotencyService } from '../idempotency/idempotency.service';
+import { IdempotencyService, StoredResponse } from '../idempotency/idempotency.service';
 import { captureLines, refundLines } from '../ledger/entries';
 import { LedgerService } from '../ledger/ledger.service';
 import { ProviderRegistry } from '../providers/provider.registry';
@@ -95,10 +95,19 @@ export class PaymentsService {
    * Capture. The payment row is locked with SELECT ... FOR UPDATE, so concurrent captures
    * serialize: the first wins, the rest see `captured` and are rejected as illegal transitions.
    */
-  capture(id: string): Promise<PaymentView> {
-    return this.db.tx(async (client) => {
+  capture(id: string): Promise<PaymentView>;
+  /** With an Idempotency-Key, a retried capture replays the first result instead of failing with 409. */
+  capture(id: string, idempotencyKey: string): Promise<StoredResponse<PaymentView> & { replayed: boolean }>;
+  capture(id: string, idempotencyKey?: string) {
+    if (idempotencyKey === undefined) {
+      return this.db.tx(async (client) => {
+        await this.captureLocked(client, id);
+        return toView(await this.lock(client, id));
+      });
+    }
+    return this.idempotency.run<PaymentView>(`POST /payments/${id}/capture`, idempotencyKey, {}, async (client) => {
       await this.captureLocked(client, id);
-      return toView(await this.lock(client, id));
+      return { status: 200, body: toView(await this.lock(client, id)) };
     });
   }
 

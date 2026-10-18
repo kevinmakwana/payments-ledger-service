@@ -1,8 +1,10 @@
 import { BadRequestException, Controller, Get, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { AdminOnly } from '../auth/auth.decorators';
 import { ReconciliationService } from './reconciliation.service';
 
 @ApiTags('reports')
+@AdminOnly()
 @Controller('reports')
 export class ReconciliationController {
   constructor(private readonly reconciliation: ReconciliationService) {}
