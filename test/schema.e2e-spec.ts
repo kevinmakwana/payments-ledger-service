@@ -34,6 +34,17 @@ describeE2E('schema indexes (e2e, real Postgres)', () => {
     await usesIndex(`SELECT id FROM payments WHERE status = 'authorized'`, 'payments_status_idx');
   });
 
+  it('serves the retention job\'s batched deletes from indexes', async () => {
+    await usesIndex(
+      `SELECT scope, key FROM idempotency_keys WHERE created_at < now() - interval '7 days' ORDER BY created_at LIMIT 5000`,
+      'idempotency_keys_created_idx',
+    );
+    await usesIndex(
+      `SELECT provider, event_id FROM webhook_events WHERE status = 'processed' AND processed_at < now() - interval '30 days' ORDER BY processed_at LIMIT 5000`,
+      'webhook_events_processed_idx',
+    );
+  });
+
   it('serves "pending payouts not touched since X" scans from payouts(status, updated_at)', async () => {
     await usesIndex(
       `SELECT id FROM payouts WHERE status = 'pending' AND updated_at < now() - interval '1 hour'`,

@@ -45,8 +45,15 @@ jobs:
         run: npm run lint
       - name: Unit tests
         run: npm test
-      - name: E2E tests (real Postgres + Redis)
-        run: npm run test:e2e
+      - name: E2E tests with coverage gate (real Postgres + Redis)
+        run: npm run test:e2e:cov
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-coverage
+          path: coverage/
+          if-no-files-found: ignore
       - name: Build
         run: npm run build
       - name: Offline demo

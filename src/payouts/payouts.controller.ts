@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { IsDateString, IsOptional } from 'class-validator';
+import { AdminOnly } from '../auth/auth.decorators';
 import { PayoutsService } from './payouts.service';
 
 class RunPayoutsDto {
@@ -15,6 +16,7 @@ export class PayoutsController {
   constructor(private readonly payouts: PayoutsService) {}
 
   @Post('payouts/run')
+  @AdminOnly()
   @HttpCode(200)
   @ApiOperation({ summary: 'Run the payout batch now (the same job the daily scheduler runs)' })
   run(@Body() dto: RunPayoutsDto) {
@@ -22,12 +24,14 @@ export class PayoutsController {
   }
 
   @Get('payouts')
+  @AdminOnly()
   @ApiOperation({ summary: 'List payouts, optionally for one seller' })
   list(@Query('sellerId') sellerId?: string) {
     return this.payouts.list(sellerId);
   }
 
   @Get('payouts/:id')
+  @AdminOnly()
   @ApiOperation({ summary: 'Fetch a payout' })
   get(@Param('id', ParseUUIDPipe) id: string) {
     return this.payouts.get(id);

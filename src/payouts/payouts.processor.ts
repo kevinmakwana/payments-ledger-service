@@ -22,6 +22,7 @@ export class PayoutsProcessor extends WorkerHost implements OnModuleInit {
     if (!this.config.schedulersEnabled) return;
     // A job scheduler is stored in Redis, so multiple app instances register one shared schedule.
     await this.queue.upsertJobScheduler('daily-payouts', { pattern: '0 2 * * *', tz: 'UTC' }, { name: 'run-batch' });
+    await this.queue.upsertJobScheduler('payout-sweeper', { pattern: this.config.payoutSweepCron, tz: 'UTC' }, { name: 'sweep' });
   }
 
   async process(job: Job): Promise<unknown> {
@@ -31,6 +32,8 @@ export class PayoutsProcessor extends WorkerHost implements OnModuleInit {
         this.logger.log(`Payout batch created ${lines.filter((l) => l.payoutId).length} payouts`);
         return { payouts: lines.filter((l) => l.payoutId).length };
       }
+      case 'sweep':
+        return this.payouts.sweep();
       case 'dispatch':
         await this.payouts.dispatch(job.data.payoutId as string);
         return undefined;

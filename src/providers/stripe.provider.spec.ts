@@ -10,7 +10,9 @@ afterEach(async () => {
   fake = undefined;
 });
 
-const providerFor = (apiBase: string, timeoutMs = 100) =>
+// Generous by default so a busy machine cannot make happy-path tests time out; timeout tests pass SHORT explicitly.
+const SHORT = 100;
+const providerFor = (apiBase: string, timeoutMs = 10_000) =>
   new StripeProvider(
     loadConfig({
       STRIPE_SECRET_KEY: 'sk_test_x',
@@ -74,7 +76,7 @@ describe('StripeProvider timeouts', () => {
   it('fails a request the server never answers with ProviderTimeoutError', async () => {
     fake = await startFakeHttp(() => undefined); // accepts the connection, never responds
     const started = Date.now();
-    await expect(providerFor(fake.url).authorize(authorizeReq)).rejects.toBeInstanceOf(ProviderTimeoutError);
+    await expect(providerFor(fake.url, SHORT).authorize(authorizeReq)).rejects.toBeInstanceOf(ProviderTimeoutError);
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
@@ -83,7 +85,7 @@ describe('StripeProvider timeouts', () => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"id":'); // never finishes the JSON
     });
-    await expect(providerFor(fake.url).authorize(authorizeReq)).rejects.toBeInstanceOf(ProviderTimeoutError);
+    await expect(providerFor(fake.url, SHORT).authorize(authorizeReq)).rejects.toBeInstanceOf(ProviderTimeoutError);
   });
 
   it('still returns normally when the server answers in time', async () => {

@@ -62,6 +62,47 @@ describeE2E('payments (e2e, real Postgres + Redis)', () => {
     });
   });
 
+  describe('idempotent capture (optional Idempotency-Key)', () => {
+    const captureEntries = async (id: string) =>
+      (await t.db.query("SELECT count(*)::int AS n FROM journal_entries WHERE kind = 'capture' AND payment_id = $1", [id])).rows[0].n;
+
+    it('replays the first response when a client retries a capture with the same key', async () => {
+      const p = (await create()).body;
+      const k = key();
+      const a = await t.call('POST', `/payments/${p.id}/capture`, undefined, { 'idempotency-key': k });
+      const b = await t.call('POST', `/payments/${p.id}/capture`, undefined, { 'idempotency-key': k });
+      expect(a.status).toBe(200);
+      expect(b.status).toBe(200); // not 409: the retry gets the stored result
+      expect(b.body).toEqual(a.body);
+      expect(b.headers.get('idempotent-replayed')).toBe('true');
+      expect(a.headers.get('idempotent-replayed')).toBeNull();
+      expect(await captureEntries(p.id)).toBe(1);
+    });
+
+    it('still rejects a second capture that uses a different key (or none) with 409', async () => {
+      const p = (await create()).body;
+      expect((await t.call('POST', `/payments/${p.id}/capture`, undefined, { 'idempotency-key': key() })).status).toBe(200);
+      expect((await t.call('POST', `/payments/${p.id}/capture`, undefined, { 'idempotency-key': key() })).status).toBe(409);
+      expect((await t.call('POST', `/payments/${p.id}/capture`)).status).toBe(409);
+      expect(await captureEntries(p.id)).toBe(1);
+    });
+
+    it('scopes the key to the payment: the same key on another payment is a separate capture', async () => {
+      const [p, q] = [(await create()).body, (await create()).body];
+      const k = key();
+      expect((await t.call('POST', `/payments/${p.id}/capture`, undefined, { 'idempotency-key': k })).status).toBe(200);
+      const other = await t.call('POST', `/payments/${q.id}/capture`, undefined, { 'idempotency-key': k });
+      expect(other.status).toBe(200);
+      expect(other.headers.get('idempotent-replayed')).toBeNull();
+      expect(await captureEntries(q.id)).toBe(1);
+    });
+
+    it('keeps working without a key, as before', async () => {
+      const p = (await create()).body;
+      expect((await t.call('POST', `/payments/${p.id}/capture`)).status).toBe(200);
+    });
+  });
+
   describe('state machine over HTTP', () => {
     it('walks authorized -> captured -> partially_refunded -> refunded', async () => {
       const p = (await create()).body;

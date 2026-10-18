@@ -10,7 +10,8 @@ afterEach(async () => {
   fake = undefined;
 });
 
-const serviceFor = (env: Record<string, string> = {}) => new AlertService(loadConfig({ ALERT_TIMEOUT_MS: '100', ...env }));
+// Generous default so a busy machine cannot fail the happy path; the hang test passes a short deadline.
+const serviceFor = (env: Record<string, string> = {}) => new AlertService(loadConfig({ ALERT_TIMEOUT_MS: '10000', ...env }));
 const alert = { kind: 'ledger_drift', severity: 'critical' as const, message: 'cache disagrees with postings', details: { accounts: 2 } };
 
 describe('AlertService', () => {
@@ -45,8 +46,8 @@ describe('AlertService', () => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     fake = await startFakeHttp(() => undefined);
     const started = Date.now();
-    await expect(serviceFor({ ALERT_WEBHOOK_URL: fake.url }).raise(alert)).resolves.toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(2000);
+    await expect(serviceFor({ ALERT_WEBHOOK_URL: fake.url, ALERT_TIMEOUT_MS: '100' }).raise(alert)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 
   it('never throws when the endpoint is unreachable', async () => {

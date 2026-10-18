@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { NestFactory } from '@nestjs/core';
 import { randomUUID } from 'crypto';
 import { AppModule } from '../src/app.module';
@@ -6,10 +7,18 @@ import { configureApp } from '../src/app.setup';
 import { DbService } from '../src/db/db.service';
 import { WebhookEvent } from '../src/providers/provider.interface';
 import { SimulatedProvider } from '../src/providers/simulated.provider';
+import { e2eMode } from './e2e-mode';
 
-/** e2e suites need real Postgres + Redis; they are skipped unless both URLs are set. */
-export const e2eEnabled = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
-export const describeE2E = e2eEnabled ? describe : describe.skip;
+/** e2e suites need real Postgres + Redis: skipped locally without them, but a hard failure in CI (see e2eMode). */
+const mode = e2eMode(process.env);
+export const e2eEnabled = mode === 'run';
+const failLoudly = ((name: string) =>
+  describe(name, () => {
+    it('requires DATABASE_URL and REDIS_URL (CI refuses to skip the e2e suites silently)', () => {
+      throw new Error('DATABASE_URL and REDIS_URL must be set when CI is true; otherwise no e2e test would run.');
+    });
+  })) as unknown as typeof describe;
+export const describeE2E: typeof describe = mode === 'run' ? describe : mode === 'skip' ? describe.skip : failLoudly;
 
 export interface TestApp {
   app: INestApplication;
@@ -35,9 +44,10 @@ export async function startApp(env: Record<string, string> = {}): Promise<TestAp
     PAYOUT_MIN_MINOR: '100',
     PAYOUT_MAX_ATTEMPTS: '2',
     PLATFORM_FEE_BPS: '1000',
+    RATE_LIMIT_MAX: '100000', // suites hammer the API from one IP; edge-protection tests lower it
     ...env,
   });
-  const app = await NestFactory.create(AppModule, { rawBody: true, logger: ['error', 'warn'] });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, logger: ['error', 'warn'] });
   configureApp(app);
   await app.listen(0);
   const url = (await app.getUrl()).replace('[::1]', '127.0.0.1');

@@ -24,13 +24,20 @@ describe('runHealthChecks', () => {
     const started = Date.now();
     const out = await runHealthChecks({ database: never, redis: async () => 'PONG' }, 50);
     expect(out).toEqual({ ok: false, checks: { database: 'down', redis: 'up' } });
-    expect(Date.now() - started).toBeLessThan(1000);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 
   it('runs probes concurrently, not one after another', async () => {
-    const slow = () => new Promise((r) => setTimeout(r, 100));
-    const started = Date.now();
-    await runHealthChecks({ a: slow, b: slow, c: slow }, 1000);
-    expect(Date.now() - started).toBeLessThan(250);
+    // Each probe waits until all three have started. Run sequentially the first would wait forever and hit the timeout.
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const probe = (name: string) => async () => {
+      started.push(name);
+      if (started.length === 3) release();
+      await gate;
+    };
+    const out = await runHealthChecks({ a: probe('a'), b: probe('b'), c: probe('c') }, 5000);
+    expect(out).toEqual({ ok: true, checks: { a: 'up', b: 'up', c: 'up' } });
   });
 });

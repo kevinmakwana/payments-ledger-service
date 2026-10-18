@@ -1,8 +1,35 @@
 {
   "rootDir": "..",
-  "roots": ["<rootDir>/test"],
+  "roots": [
+    "<rootDir>/test"
+  ],
   "testRegex": ".*\\.e2e-spec\\.ts$",
-  "transform": { "^.+\\.ts$": ["ts-jest", { "tsconfig": "<rootDir>/tsconfig.json" }] },
+  "transform": {
+    "^.+\\.ts$": [
+      "ts-jest",
+      {
+        "tsconfig": "<rootDir>/tsconfig.json"
+      }
+    ]
+  },
   "testEnvironment": "node",
-  "testTimeout": 30000
+  "testTimeout": 30000,
+  "collectCoverageFrom": [
+    "src/**/*.ts",
+    "!src/**/*.spec.ts",
+    "!src/demo/**",
+    "!src/main.ts"
+  ],
+  "coverageReporters": [
+    "text-summary",
+    "lcov"
+  ],
+  "coverageThreshold": {
+    "global": {
+      "statements": 80,
+      "branches": 60,
+      "functions": 80,
+      "lines": 82
+    }
+  }
 }
