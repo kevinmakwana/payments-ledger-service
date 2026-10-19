@@ -4,6 +4,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import {
   AuthorizeRequest,
   PaymentProvider,
+  ProviderRejectedError,
   ProviderTransaction,
   WebhookEvent,
   WebhookVerificationError,
@@ -36,12 +37,17 @@ export class RazorpayProvider implements PaymentProvider {
     return { providerRef: p.id as string };
   }
 
-  async capture(req: { providerRef: string; amount: number; currency: string }) {
+  async capture(req: Parameters<PaymentProvider['capture']>[0]) {
     await this.call('POST', `/payments/${req.providerRef}/capture`, { amount: req.amount, currency: req.currency });
     return { reportedRef: req.providerRef };
   }
 
-  async refund(req: { refundId: string; providerRef: string; amount: number }) {
+  /** Razorpay has no cancel API: an uncaptured authorization is released automatically, so this is a definitive refusal. */
+  async void(_req: { paymentId: string; providerRef: string; idempotencyKey: string }): Promise<void> {
+    throw new ProviderRejectedError('void_not_supported', 'Razorpay releases uncaptured authorizations automatically; they cannot be voided via the API');
+  }
+
+  async refund(req: Parameters<PaymentProvider['refund']>[0]) {
     const r = await this.call('POST', `/payments/${req.providerRef}/refund`, { amount: req.amount, receipt: req.refundId });
     return { refundRef: r.id as string };
   }
@@ -105,6 +111,15 @@ export class RazorpayProvider implements PaymentProvider {
     switch (e.event) {
       case 'payment.captured':
         return { ...base, type: 'payment.captured', data: { providerRef: p.id, paymentId: p.notes?.payment_id, amount: p.amount } };
+      case 'payment.dispute.created':
+      case 'payment.dispute.won':
+      case 'payment.dispute.lost': {
+        const d = e.payload?.dispute?.entity ?? {};
+        const type = e.event === 'payment.dispute.created' ? 'dispute.opened' : e.event === 'payment.dispute.won' ? 'dispute.won' : 'dispute.lost';
+        return { ...base, type, data: { disputeRef: d.id, providerRef: d.payment_id, amount: d.amount, currency: d.currency, reason: d.reason_code } };
+      }
+      case 'payment.failed':
+        return { ...base, type: 'payment.failed', data: { providerRef: p.id, paymentId: p.notes?.payment_id, reason: p.error_description } };
       case 'refund.processed':
         return { ...base, type: 'payment.refunded', data: { providerRef: r.payment_id, refundRef: r.id, amount: r.amount } };
       case 'payout.processed':
@@ -134,7 +149,13 @@ export class RazorpayProvider implements PaymentProvider {
       },
       this.config.providerTimeoutMs,
     );
-    if (!res.ok) throw new Error(`Razorpay ${res.status}: ${res.json.error?.description ?? 'request failed'}`);
+    if (!res.ok) {
+      const e = res.json.error ?? {};
+      const message = e.description ?? 'request failed';
+      // 400 BAD_REQUEST_ERROR cannot succeed on retry; gateway/server errors, 429 and 401 are retried or operational.
+      if (res.status === 400 && e.code === 'BAD_REQUEST_ERROR') throw new ProviderRejectedError(e.code, message);
+      throw new Error(`Razorpay ${res.status}: ${message}`);
+    }
     return res.json;
   }
 }

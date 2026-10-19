@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { FakeHttp, respondJson, startFakeHttp } from '../../test/fake-http';
 import { loadConfig } from '../config/config';
+import { newContext, runWithContext } from '../observability/request-context';
 import { AlertService } from './alert.service';
 
 let fake: FakeHttp | undefined;
@@ -34,6 +35,13 @@ describe('AlertService', () => {
     expect(req.headers['content-type']).toContain('application/json');
     expect(JSON.parse(req.body)).toMatchObject({ service: 'payments-ledger-service', ...alert });
     expect(JSON.parse(req.body).at).toEqual(expect.any(String));
+  });
+
+  it('carries the current request\'s trace id to the alert webhook', async () => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, 200, { ok: true }));
+    const ctx = newContext({});
+    await runWithContext(ctx, () => serviceFor({ ALERT_WEBHOOK_URL: fake!.url }).raise(alert));
+    expect(fake.requests[0].headers['traceparent']).toMatch(new RegExp(`^00-${ctx.traceId}-[0-9a-f]{16}-01$`));
   });
 
   it('never throws when the endpoint answers with an error', async () => {

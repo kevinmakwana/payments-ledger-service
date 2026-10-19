@@ -1,6 +1,15 @@
 import fc from 'fast-check';
 import { cumulativeFeeRefund, feeFor } from '../common/money';
-import { captureLines, payoutInitiatedLines, payoutReversedLines, payoutSettledLines, refundLines } from './entries';
+import {
+  captureLines,
+  disputeLostLines,
+  disputeOpenedLines,
+  disputeWonLines,
+  payoutInitiatedLines,
+  payoutReversedLines,
+  payoutSettledLines,
+  refundLines,
+} from './entries';
 import { assertBalanced, UnbalancedEntryError } from './ledger.service';
 
 const sum = (lines: { amount: number }[]) => lines.reduce((s, l) => s + l.amount, 0);
@@ -67,3 +76,54 @@ describe('ledger entry builders (property-style)', () => {
     expect(() => assertBalanced([usd[0], eur[1]])).toThrow(UnbalancedEntryError);
   });
 });
+
+describe('dispute entries', () => {
+  const money = fc.integer({ min: 1, max: 1_000_000_000 });
+  const net = (...entries: { account: { code: string }; amount: number }[][]) => {
+    const by = new Map<string, number>();
+    for (const l of entries.flat()) by.set(l.account.code, (by.get(l.account.code) ?? 0) + l.amount);
+    return Object.fromEntries([...by].filter(([, v]) => v !== 0));
+  };
+  const parts = fc
+    .tuple(money, fc.integer({ min: 0, max: 10_000 }))
+    .map(([amount, bps]) => ({ amount, feePart: Math.floor((amount * bps) / 10_000) }));
+  const args = (a: { amount: number; feePart: number }) => ({ sellerId: 's1', currency: 'USD', ...a });
+
+  it('opening, winning and losing a dispute each balance for any amount and fee share', () => {
+    fc.assert(
+      fc.property(parts, (a) => {
+        for (const lines of [disputeOpenedLines(args(a)), disputeWonLines(args(a)), disputeLostLines(args(a))]) assertBalanced(lines);
+      }),
+    );
+  });
+
+  it('opened then won nets to zero on every account: nothing was lost', () => {
+    fc.assert(fc.property(parts, (a) => expect(net(disputeOpenedLines(args(a)), disputeWonLines(args(a)))).toEqual({})));
+  });
+
+  it('opened then lost has exactly the effect of a refund: provider cash gone, seller bears their share, platform returns its fee share', () => {
+    fc.assert(
+      fc.property(parts, (a) => {
+        const refund = refundLines({ sellerId: 's1', currency: 'USD', amount: a.amount, feeRefund: a.feePart });
+        expect(net(disputeOpenedLines(args(a)), disputeLostLines(args(a)))).toEqual(net(refund));
+      }),
+    );
+  });
+
+  it('while open, the money sits in disputed funds and the seller share in the hold account', () => {
+    expect(net(disputeOpenedLines({ sellerId: 's1', currency: 'USD', amount: 10_000, feePart: 1_000 }))).toEqual({
+      'platform:clearing:USD': -10_000,
+      'platform:disputed_funds:USD': 10_000,
+      'seller:s1:USD': 9_000,
+      'platform:dispute_holds:USD': -9_000,
+    });
+  });
+
+  it('a 100% fee leaves no seller share, and zero postings are never produced', () => {
+    for (const lines of [disputeOpenedLines(args({ amount: 500, feePart: 500 })), disputeLostLines(args({ amount: 500, feePart: 500 }))]) {
+      assertBalanced(lines);
+      expect(lines.every((l) => l.amount !== 0)).toBe(true);
+    }
+  });
+});
+

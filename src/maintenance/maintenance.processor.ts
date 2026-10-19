@@ -6,7 +6,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import { MaintenanceService } from './maintenance.service';
 
 /** Runs the retention purge on a shared Redis-backed schedule (once per tick however many instances run). */
-@Processor(MAINTENANCE_QUEUE)
+@Processor(MAINTENANCE_QUEUE, { autorun: false })
 export class MaintenanceProcessor extends WorkerHost implements OnModuleInit {
   constructor(
     private readonly maintenance: MaintenanceService,

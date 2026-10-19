@@ -3,9 +3,12 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { loadConfig } from './config/config';
+import { MetricsService } from './observability/metrics.service';
+import { observabilityMiddleware } from './observability/observability.middleware';
 
 export function configureApp(app: NestExpressApplication): void {
   const config = loadConfig();
+  app.use(observabilityMiddleware(app.get(MetricsService))); // first: request ids, access log, HTTP metrics
   if (config.trustProxy !== undefined) app.set('trust proxy', config.trustProxy); // so rate limits see the real client IP
   // CSP is off: this is a JSON API, and Swagger UI at /docs relies on inline scripts a default CSP would block.
   app.use(helmet({ contentSecurityPolicy: false }));

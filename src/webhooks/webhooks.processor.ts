@@ -12,7 +12,7 @@ interface WebhookJob {
   eventId: string;
 }
 
-@Processor(WEBHOOK_QUEUE, { concurrency: 5 })
+@Processor(WEBHOOK_QUEUE, { concurrency: 5, autorun: false })
 export class WebhooksProcessor extends WorkerHost {
   private readonly logger = new Logger(WebhooksProcessor.name);
 
@@ -34,7 +34,7 @@ export class WebhooksProcessor extends WorkerHost {
     const event = row.rows[0];
     if (!event || event.status === 'processed') return; // handlers are idempotent; skip finished work
     await this.db.query('UPDATE webhook_events SET attempts = attempts + 1 WHERE provider = $1 AND event_id = $2', [provider, eventId]);
-    await this.handlers.handle(event.payload);
+    await this.handlers.handle(provider, event.payload);
     await this.db.query(
       `UPDATE webhook_events SET status = 'processed', processed_at = now(), last_error = NULL WHERE provider = $1 AND event_id = $2`,
       [provider, eventId],

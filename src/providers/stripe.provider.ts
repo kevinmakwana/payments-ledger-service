@@ -3,6 +3,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import {
   AuthorizeRequest,
   PaymentProvider,
+  ProviderRejectedError,
   ProviderTransaction,
   WebhookEvent,
   WebhookVerificationError,
@@ -39,13 +40,17 @@ export class StripeProvider implements PaymentProvider {
     return { providerRef: pi.id as string };
   }
 
-  async capture(req: { paymentId: string; providerRef: string; amount: number }) {
-    const pi = await this.post(`/payment_intents/${req.providerRef}/capture`, { amount_to_capture: req.amount }, `cap_${req.paymentId}`);
+  async capture(req: Parameters<PaymentProvider['capture']>[0]) {
+    const pi = await this.post(`/payment_intents/${req.providerRef}/capture`, { amount_to_capture: req.amount }, req.idempotencyKey);
     return { reportedRef: pi.latest_charge as string };
   }
 
-  async refund(req: { refundId: string; providerRef: string; amount: number }) {
-    const r = await this.post('/refunds', { payment_intent: req.providerRef, amount: req.amount, 'metadata[refund_id]': req.refundId }, `ref_${req.refundId}`);
+  async void(req: { paymentId: string; providerRef: string; idempotencyKey: string }): Promise<void> {
+    await this.post(`/payment_intents/${req.providerRef}/cancel`, {}, req.idempotencyKey);
+  }
+
+  async refund(req: Parameters<PaymentProvider['refund']>[0]) {
+    const r = await this.post('/refunds', { payment_intent: req.providerRef, amount: req.amount, 'metadata[refund_id]': req.refundId }, req.idempotencyKey);
     return { refundRef: r.id as string };
   }
 
@@ -103,6 +108,19 @@ export class StripeProvider implements PaymentProvider {
           return { ...base, type: 'payment.captured', data: { providerRef: o.payment_intent, paymentId: o.metadata?.payment_id, amount: o.amount_captured } };
         case 'refund.created':
           return { ...base, type: 'payment.refunded', data: { providerRef: o.payment_intent, refundRef: o.id, amount: o.amount } };
+        case 'charge.dispute.created':
+        case 'charge.dispute.closed': {
+          // `warning_*` statuses are inquiries: the bank asked a question but withdrew no funds, so nothing may hit the ledger.
+          const status = String(o.status ?? '');
+          const data = { disputeRef: o.id, providerRef: o.payment_intent, amount: o.amount, currency: String(o.currency ?? '').toUpperCase(), reason: o.reason };
+          if (status.startsWith('warning_')) return { ...base, type: 'dispute.inquiry', data };
+          if (e.type === 'charge.dispute.created') return { ...base, type: 'dispute.opened', data };
+          if (status === 'won') return { ...base, type: 'dispute.won', data };
+          if (status === 'lost') return { ...base, type: 'dispute.lost', data };
+          return { ...base, type: `dispute.${status || 'closed'}`, data }; // expired etc.: stored, not acted on
+        }
+        case 'payment_intent.payment_failed':
+          return { ...base, type: 'payment.failed', data: { providerRef: o.id, paymentId: o.metadata?.payment_id, reason: o.last_payment_error?.message } };
         case 'transfer.created':
           return { ...base, type: 'payout.paid', data: { payoutId: o.metadata?.payout_id, payoutRef: o.id, amount: o.amount } };
         case 'transfer.reversed':
@@ -132,8 +150,19 @@ export class StripeProvider implements PaymentProvider {
     return this.handle(await providerRequest(this.name, this.config.stripeApiBase + path, { headers: this.headers() }, this.config.providerTimeoutMs));
   }
 
+  /**
+   * Definitive refusals (declined card, invalid request, unknown resource) become ProviderRejectedError. Anything whose
+   * outcome is unknown or operational stays a plain Error so it is retried rather than shown as a decline: 5xx and
+   * `api_error`, 429, 408, 409 (same-key request still in flight) and 401/403 (our credentials, not the customer's card).
+   */
   private handle(res: ProviderResponse): Record<string, any> {
-    if (!res.ok) throw new Error(`Stripe ${res.status}: ${res.json.error?.message ?? 'request failed'}`);
-    return res.json;
+    if (res.ok) return res.json;
+    const e = res.json.error ?? {};
+    const message = e.message ?? 'request failed';
+    const retryable = res.status >= 500 || [401, 403, 408, 409, 429].includes(res.status);
+    if (!retryable && ['card_error', 'invalid_request_error', 'idempotency_error'].includes(e.type)) {
+      throw new ProviderRejectedError(e.code ?? e.type, message);
+    }
+    throw new Error(`Stripe ${res.status}: ${message}`);
   }
 }

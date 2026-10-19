@@ -1,6 +1,8 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { WEBHOOK_DLQ, WEBHOOK_QUEUE } from '../common/queues';
+import { DisputesModule } from '../disputes/disputes.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { PayoutsModule } from '../payouts/payouts.module';
 import { ProvidersModule } from '../providers/providers.module';
 import { WebhookHandlers } from './webhook-handlers';
@@ -12,6 +14,8 @@ import { WebhooksService } from './webhooks.service';
   imports: [
     ProvidersModule,
     PayoutsModule,
+    DisputesModule,
+    PaymentsModule,
     BullModule.registerQueue({ name: WEBHOOK_QUEUE }, { name: WEBHOOK_DLQ }),
   ],
   controllers: [WebhooksController],

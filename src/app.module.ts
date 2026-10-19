@@ -8,17 +8,20 @@ import { DbModule } from './db/db.module';
 import { HealthModule } from './health/health.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { MaintenanceModule } from './maintenance/maintenance.module';
+import { ObservabilityModule } from './observability/observability.module';
 import { MonitoringModule } from './monitoring/monitoring.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PayoutsModule } from './payouts/payouts.module';
 import { ReconciliationModule } from './reconciliation/reconciliation.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
+import { WorkerModule } from './worker/worker.module';
 
 @Module({
   imports: [
     ConfigModule,
     DbModule,
     AlertsModule,
+    ObservabilityModule,
     AuthModule,
     BullModule.forRootAsync({
       inject: [APP_CONFIG],
@@ -35,6 +38,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     HealthModule,
     MonitoringModule,
     MaintenanceModule,
+    WorkerModule,
   ],
 })
 export class AppModule {}

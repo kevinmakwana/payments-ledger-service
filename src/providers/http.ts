@@ -1,4 +1,5 @@
 import { ProviderTimeoutError } from '../common/errors';
+import { traceHeaders } from '../observability/request-context';
 
 /** Hard stop for paginated listings, so a misbehaving API can never loop forever (or silently truncate). */
 export const MAX_LIST_PAGES = 500;
@@ -21,7 +22,9 @@ export async function providerRequest(
   timeoutMs: number,
 ): Promise<ProviderResponse> {
   try {
-    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    // Continue the caller's W3C trace (if any) so a provider-side log line can be tied back to our request.
+    const headers = { ...(init.headers as Record<string, string> | undefined), ...traceHeaders() };
+    const res = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(timeoutMs) });
     const json = (await res.json()) as ProviderResponse['json'];
     return { ok: res.ok, status: res.status, json };
   } catch (err) {

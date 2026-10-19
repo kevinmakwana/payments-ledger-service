@@ -1,4 +1,4 @@
-import { AccountRef, clearing, fees, payoutsInTransit, sellerPayable } from './accounts';
+import { AccountRef, clearing, disputedFunds, disputeHolds, fees, payoutsInTransit, sellerPayable } from './accounts';
 
 /** One side of a journal entry. amount > 0 is a debit, amount < 0 is a credit. */
 export interface PostingLine {
@@ -48,3 +48,52 @@ export function payoutSettledLines(p: { currency: string; amount: number }): Pos
 export function payoutReversedLines(p: { sellerId: string; currency: string; amount: number }): PostingLine[] {
   return [debit(payoutsInTransit(p.currency), p.amount), credit(sellerPayable(p.sellerId, p.currency), p.amount)];
 }
+
+interface DisputeParts {
+  sellerId: string;
+  currency: string;
+  /** Disputed amount the provider withdrew. */
+  amount: number;
+  /** The platform fee that corresponds to the disputed amount (pro rata); the seller's share is the rest. */
+  feePart: number;
+}
+
+/**
+ * The provider withdrew the disputed amount from our balance. We may win it back, so it is parked in "disputed
+ * funds" (a receivable), and the seller's share is withheld from their payable balance into the hold account so it
+ * cannot be paid out meanwhile. The platform's fee share stays in revenue until the outcome is known.
+ */
+export function disputeOpenedLines(p: DisputeParts): PostingLine[] {
+  const sellerShare = p.amount - p.feePart;
+  return nonZero([
+    debit(disputedFunds(p.currency), p.amount),
+    credit(clearing(p.currency), p.amount),
+    debit(sellerPayable(p.sellerId, p.currency), sellerShare),
+    credit(disputeHolds(p.currency), sellerShare),
+  ]);
+}
+
+/** Dispute won: the provider returns the money and the seller's withheld share is released. Exactly undoes the opening. */
+export function disputeWonLines(p: DisputeParts): PostingLine[] {
+  const sellerShare = p.amount - p.feePart;
+  return nonZero([
+    debit(clearing(p.currency), p.amount),
+    credit(disputedFunds(p.currency), p.amount),
+    debit(disputeHolds(p.currency), sellerShare),
+    credit(sellerPayable(p.sellerId, p.currency), sellerShare),
+  ]);
+}
+
+/**
+ * Dispute lost: the receivable is written off. The seller keeps bearing their share (the hold is consumed) and the
+ * platform returns its fee share. Together with the opening this is exactly the effect of a refund.
+ */
+export function disputeLostLines(p: DisputeParts): PostingLine[] {
+  const sellerShare = p.amount - p.feePart;
+  return nonZero([
+    credit(disputedFunds(p.currency), p.amount),
+    debit(disputeHolds(p.currency), sellerShare),
+    debit(fees(p.currency), p.feePart),
+  ]);
+}
+

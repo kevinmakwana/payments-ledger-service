@@ -31,7 +31,7 @@ describeE2E('schema indexes (e2e, real Postgres)', () => {
   });
 
   it('serves status lookups on payments', async () => {
-    await usesIndex(`SELECT id FROM payments WHERE status = 'authorized'`, 'payments_status_idx');
+    await usesIndex(`SELECT id FROM payments WHERE status = 'captured'`, 'payments_status_idx');
   });
 
   it('serves the retention job\'s batched deletes from indexes', async () => {
