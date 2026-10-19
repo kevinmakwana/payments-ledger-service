@@ -18,3 +18,12 @@
 - [x] **T13** Payouts use the provider that took the payment (plus Razorpay payout idempotency header)
 - [x] **T14** Failure-injection tests (crash after provider call / after commit); e2e fails loudly in CI when env vars are missing
 - [x] **T15** Coverage reporting with a threshold; investigate the `npm audit` findings
+
+## Phase 3: Architecture
+- [x] **T16** Transactional outbox: provider calls (authorize / capture / refund) run outside the DB transaction, durable `provider_operations`, deterministic provider idempotency keys, lease-based recovery worker
+- [x] **T17** Payment lifecycle: `failed`, `voiding`, `voided`, `expired` states, void endpoint, authorization expiry, persisted failed attempts (402)
+- [x] **T18** Failure, dispute and chargeback webhooks as ledger events, with negative-balance recovery
+- [x] **T19** Structured logging with request IDs, global exception filter, Prometheus metrics, tracing
+- [x] **T20** Pagination and filters on list endpoints; new read APIs for payments, journal entries and account statements
+- [x] **T21** Dockerfile, production deployment config, separate worker process mode
+

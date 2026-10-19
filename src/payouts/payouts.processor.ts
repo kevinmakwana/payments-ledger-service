@@ -6,7 +6,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import { PayoutsService } from './payouts.service';
 
 /** Consumes the payouts queue: the daily batch trigger and per-payout dispatch jobs. */
-@Processor(PAYOUT_QUEUE)
+@Processor(PAYOUT_QUEUE, { autorun: false })
 export class PayoutsProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(PayoutsProcessor.name);
 

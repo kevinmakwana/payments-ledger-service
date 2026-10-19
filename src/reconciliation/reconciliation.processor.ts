@@ -7,7 +7,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import { ReconciliationService } from './reconciliation.service';
 
 /** Nightly job: reconcile yesterday (UTC) for the default provider and keep the report. */
-@Processor(RECONCILIATION_QUEUE)
+@Processor(RECONCILIATION_QUEUE, { autorun: false })
 export class ReconciliationProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(ReconciliationProcessor.name);
 

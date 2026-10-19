@@ -1,10 +1,11 @@
 import {
-  BadRequestException, Controller, Get, HttpCode, Param, Post, Req, UnauthorizedException,
+  BadRequestException, Controller, Get, HttpCode, Param, Post, Query, Req, UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { AdminOnly, Public } from '../auth/auth.decorators';
+import { PageQuery } from '../common/pagination';
 import { WebhookVerificationError } from '../providers/provider.interface';
 import { ProviderRegistry } from '../providers/provider.registry';
 import { WebhooksService } from './webhooks.service';
@@ -48,8 +49,8 @@ export class WebhooksController {
   @Get('dead-letters')
   @AdminOnly()
   @ApiOperation({ summary: 'Webhook events that exhausted their retries' })
-  deadLetters() {
-    return this.webhooks.deadLetters();
+  deadLetters(@Query() query: PageQuery) {
+    return this.webhooks.deadLetters(query);
   }
 
   @Post('dead-letters/:provider/:eventId/retry')

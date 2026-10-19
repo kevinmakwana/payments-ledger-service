@@ -2,6 +2,9 @@ import { ServerResponse } from 'http';
 import { FakeHttp, respondJson, startFakeHttp } from '../../test/fake-http';
 import { ProviderTimeoutError } from '../common/errors';
 import { loadConfig } from '../config/config';
+import { ProviderRejectedError } from './provider.interface';
+import { newContext, runWithContext } from '../observability/request-context';
+import { signTimestamped } from './signature';
 import { StripeProvider } from './stripe.provider';
 
 let fake: FakeHttp | undefined;
@@ -23,6 +26,108 @@ const providerFor = (apiBase: string, timeoutMs = 10_000) =>
   );
 
 const authorizeReq = { paymentId: 'p1', amount: 1000, currency: 'USD', idempotencyKey: 'k1:authorize' };
+
+describe('StripeProvider webhook mapping (disputes and failures)', () => {
+  const NOW = 1_800_000_000;
+  const parse = (type: string, object: Record<string, unknown>) => {
+    const body = JSON.stringify({ id: 'evt_1', type, created: NOW, data: { object } });
+    const headers = { 'stripe-signature': signTimestamped('whsec_x', body, NOW) };
+    return providerFor('http://unused').parseWebhook(Buffer.from(body), headers, NOW);
+  };
+  const dispute = { id: 'dp_1', amount: 5000, currency: 'usd', payment_intent: 'pi_1', charge: 'ch_1', reason: 'fraudulent' };
+
+  it('maps a created dispute to dispute.opened with the amount, currency and our payment reference', () => {
+    expect(parse('charge.dispute.created', { ...dispute, status: 'needs_response' })).toMatchObject({
+      id: 'evt_1',
+      type: 'dispute.opened',
+      data: { disputeRef: 'dp_1', providerRef: 'pi_1', amount: 5000, currency: 'USD', reason: 'fraudulent' },
+    });
+  });
+
+  it.each([
+    ['won', 'dispute.won'],
+    ['lost', 'dispute.lost'],
+  ])('maps a closed dispute with status %s to %s', (status, type) => {
+    expect(parse('charge.dispute.closed', { ...dispute, status })).toMatchObject({ type, data: { disputeRef: 'dp_1', providerRef: 'pi_1', amount: 5000 } });
+  });
+
+  it('does not treat a warning_* inquiry as a dispute: no funds were withdrawn, so nothing must hit the ledger', () => {
+    expect(parse('charge.dispute.created', { ...dispute, status: 'warning_needs_response' }).type).toBe('dispute.inquiry');
+    expect(parse('charge.dispute.closed', { ...dispute, status: 'warning_closed' }).type).toBe('dispute.inquiry');
+  });
+
+  it('maps a failed payment intent to payment.failed with the reason', () => {
+    expect(
+      parse('payment_intent.payment_failed', { id: 'pi_1', metadata: { payment_id: 'pay-1' }, last_payment_error: { message: 'Card expired' } }),
+    ).toMatchObject({ type: 'payment.failed', data: { providerRef: 'pi_1', paymentId: 'pay-1', reason: 'Card expired' } });
+  });
+});
+
+describe('StripeProvider trace propagation', () => {
+  const TRACE = '4bf92f3577b34da6a3ce929d0e0e4736';
+
+  it('continues the caller\'s trace on outgoing calls, with a new span id', async () => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, 200, { id: 'pi_1' }));
+    const ctx = newContext({ traceparent: `00-${TRACE}-00f067aa0ba902b7-01` });
+    await runWithContext(ctx, () => providerFor(fake!.url).authorize(authorizeReq));
+    expect(fake.requests[0].headers['traceparent']).toMatch(new RegExp(`^00-${TRACE}-[0-9a-f]{16}-01$`));
+  });
+
+  it('sends no traceparent when there is no request context (background jobs)', async () => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, 200, { id: 'pi_1' }));
+    await providerFor(fake.url).authorize(authorizeReq);
+    expect(fake.requests[0].headers['traceparent']).toBeUndefined();
+  });
+});
+
+describe('StripeProvider error classification', () => {
+  const fails = (status: number, error: Record<string, unknown>) => async () => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, status, { error }));
+    return providerFor(fake.url).authorize(authorizeReq);
+  };
+
+  it('treats a declined card (402 card_error) as a definitive rejection carrying Stripe\'s code and message', async () => {
+    const err = await fails(402, { type: 'card_error', code: 'card_declined', message: 'Your card was declined.' })().catch((e) => e);
+    expect(err).toBeInstanceOf(ProviderRejectedError);
+    expect(err).toMatchObject({ code: 'card_declined', message: 'Your card was declined.' });
+  });
+
+  it('treats an invalid request (400 invalid_request_error) as definitive', async () => {
+    await expect(fails(400, { type: 'invalid_request_error', code: 'amount_too_small', message: 'Amount too small' })()).rejects.toBeInstanceOf(ProviderRejectedError);
+  });
+
+  it.each([
+    [500, { type: 'api_error', message: 'Stripe is having a bad day' }],
+    [429, { type: 'invalid_request_error', code: 'rate_limit', message: 'Too many requests' }],
+    [401, { type: 'invalid_request_error', message: 'Invalid API Key provided' }],
+    [403, { type: 'invalid_request_error', message: 'Forbidden' }],
+  ])('does NOT treat %s as a rejection: outcome unknown or operational, so it must be retried, not shown as a decline', async (status, error) => {
+    const err = await fails(status, error)().catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ProviderRejectedError);
+  });
+});
+
+describe('StripeProvider capture, refund and void', () => {
+  it('sends the caller\'s idempotency key on capture and refund, so a re-execution is deduplicated by Stripe', async () => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, 200, { id: 'x_1', latest_charge: 'ch_1' }));
+    const provider = providerFor(fake.url);
+    await provider.capture({ paymentId: 'p1', providerRef: 'pi_1', amount: 1000, currency: 'USD', idempotencyKey: 'capture:p1:1' });
+    await provider.refund({ refundId: 'r1', providerRef: 'pi_1', amount: 500, currency: 'USD', idempotencyKey: 'refund:r1' });
+    expect(fake.requests.map((r) => [r.url, r.headers['idempotency-key']])).toEqual([
+      ['/payment_intents/pi_1/capture', 'capture:p1:1'],
+      ['/refunds', 'refund:r1'],
+    ]);
+  });
+
+  it('cancels the PaymentIntent to void an authorization', async () => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, 200, { id: 'pi_1', status: 'canceled' }));
+    await providerFor(fake.url).void({ paymentId: 'p1', providerRef: 'pi_1', idempotencyKey: 'void:p1' });
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]).toMatchObject({ method: 'POST', url: '/payment_intents/pi_1/cancel' });
+    expect(fake.requests[0].headers['idempotency-key']).toBe('void:p1');
+  });
+});
 
 describe('StripeProvider payout idempotency keys', () => {
   const payout = { payoutId: 'po-1', sellerId: 'acct_1', amount: 5000, currency: 'USD' };

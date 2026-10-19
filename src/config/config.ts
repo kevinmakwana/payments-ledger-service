@@ -15,6 +15,27 @@ export interface AppConfig {
   payoutMaxAttempts: number;
   payoutRetryBackoffMs: number;
   schedulersEnabled: boolean;
+  /**
+   * What this process does: `api` serves HTTP only, `worker` runs the BullMQ workers and schedulers (plus a small
+   * health/metrics server on `workerHealthPort`), `all` does both in one process (the default).
+   */
+  role: 'all' | 'api' | 'worker';
+  workerHealthPort: number;
+  /** Where the simulated provider POSTs its webhooks. Needed when the API and worker run in separate processes. */
+  simulatedWebhookBaseUrl?: string;
+  /** `json` (one structured line per event, for log pipelines) or `pretty` (Nest's coloured console). Default: json in production. */
+  logFormat: 'json' | 'pretty';
+  logLevel: 'verbose' | 'debug' | 'info' | 'warn' | 'error';
+  /** A provider operation claimed longer ago than this is considered abandoned (crashed process) and can be re-claimed. */
+  providerOpLeaseMs: number;
+  /** Open operations with at least this many attempts raise a `provider_operation_stuck` alert. */
+  providerOpMaxAttempts: number;
+  /** The recovery worker only touches payments/refunds idle for at least this long (don't race live requests). */
+  paymentRecoveryAgeMs: number;
+  /** Cron (UTC) for the payment recovery + authorization expiry worker. */
+  paymentRecoveryCron: string;
+  /** An authorized payment not captured within this many hours is voided and marked `expired`. */
+  authorizationTtlHours: number;
   /** Idempotency keys older than this are deleted; a client reusing a key after this window would create a duplicate. */
   idempotencyKeyTtlHours: number;
   /** Processed webhook events older than this are deleted (received and dead-lettered events are never purged). */
@@ -68,6 +89,8 @@ const int = (v: string | undefined, d: number): number => {
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const role = env.APP_ROLE ?? 'all';
+  if (role !== 'all' && role !== 'api' && role !== 'worker') throw new Error(`APP_ROLE must be all, api or worker (got "${role}")`);
   const apiKeys = parseApiKeys(env.API_KEYS);
   if (apiKeys.length === 0 && env.NODE_ENV === 'production' && env.ALLOW_UNAUTHENTICATED !== 'true') {
     throw new Error('API_KEYS must be set in production (set ALLOW_UNAUTHENTICATED=true only to run an open API on purpose)');
@@ -85,7 +108,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     payoutMinMinor: int(env.PAYOUT_MIN_MINOR, 100),
     payoutMaxAttempts: int(env.PAYOUT_MAX_ATTEMPTS, 3),
     payoutRetryBackoffMs: int(env.PAYOUT_RETRY_BACKOFF_MS, 60_000),
-    schedulersEnabled: env.SCHEDULERS_ENABLED !== 'false',
+    // Schedulers live in the worker tier: an `api` process never registers the cron jobs.
+    schedulersEnabled: env.SCHEDULERS_ENABLED !== 'false' && role !== 'api',
+    role,
+    workerHealthPort: int(env.WORKER_PORT, 3001),
+    simulatedWebhookBaseUrl: env.SIMULATED_WEBHOOK_BASE_URL || undefined,
+    logFormat: env.LOG_FORMAT === 'json' || env.LOG_FORMAT === 'pretty' ? env.LOG_FORMAT : env.NODE_ENV === 'production' ? 'json' : 'pretty',
+    logLevel: (['verbose', 'debug', 'info', 'warn', 'error'] as const).find((l) => l === env.LOG_LEVEL) ?? 'info',
+    providerOpLeaseMs: int(env.PROVIDER_OP_LEASE_MS, 60_000),
+    providerOpMaxAttempts: int(env.PROVIDER_OP_MAX_ATTEMPTS, 10),
+    paymentRecoveryAgeMs: int(env.PAYMENT_RECOVERY_AGE_MS, 60_000),
+    paymentRecoveryCron: env.PAYMENT_RECOVERY_CRON || '* * * * *',
+    authorizationTtlHours: int(env.AUTHORIZATION_TTL_HOURS, 168),
     idempotencyKeyTtlHours: int(env.IDEMPOTENCY_KEY_TTL_HOURS, 168),
     webhookRetentionDays: int(env.WEBHOOK_RETENTION_DAYS, 30),
     maintenanceCron: env.MAINTENANCE_CRON || '0 4 * * *',

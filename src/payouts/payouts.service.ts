@@ -5,9 +5,12 @@ import { PoolClient } from 'pg';
 import { PAYOUT_QUEUE } from '../common/queues';
 import { APP_CONFIG, AppConfig } from '../config/config';
 import { AlertService } from '../alerts/alert.service';
+import { decodeCursor, isPgTimestamp, isUuid, Page, pageOf, resolveLimit, Where } from '../common/pagination';
 import { DbService } from '../db/db.service';
 import { payoutInitiatedLines, payoutReversedLines, payoutSettledLines } from '../ledger/entries';
 import { LedgerService } from '../ledger/ledger.service';
+import { MetricsService } from '../observability/metrics.service';
+import { ProviderRejectedError } from '../providers/provider.interface';
 import { ProviderRegistry } from '../providers/provider.registry';
 import { allocateAcrossProviders, holdCutoff, payableAmount, SellerBalanceParts } from './payout-math';
 
@@ -30,6 +33,7 @@ const toView = (p: PayoutRow) => ({
   amount: p.amount,
   currency: p.currency.trim(),
   status: p.status,
+  provider: p.provider,
   attempts: p.attempts,
   lastError: p.last_error,
   createdAt: p.created_at.toISOString(),
@@ -59,6 +63,7 @@ export class PayoutsService {
     private readonly ledger: LedgerService,
     private readonly providers: ProviderRegistry,
     private readonly alerts: AlertService,
+    private readonly metrics: MetricsService,
     @InjectQueue(PAYOUT_QUEUE) private readonly queue: Queue,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
@@ -172,13 +177,24 @@ export class PayoutsService {
       const p = await this.lockPayout(client, payoutId);
       if (p.status !== 'pending' || p.provider_ref) return; // already final, or an attempt is in flight
       const attempt = p.attempts + 1;
-      const { payoutRef } = await this.providers.get(p.provider).createPayout({
-        payoutId,
-        sellerId: p.seller_id,
-        amount: p.amount,
-        currency: p.currency.trim(),
-        attempt,
-      });
+      const labels = { provider: p.provider, operation: 'payout' };
+      const stopTimer = this.metrics.providerDuration.startTimer(labels);
+      let payoutRef: string;
+      try {
+        ({ payoutRef } = await this.providers.get(p.provider).createPayout({
+          payoutId,
+          sellerId: p.seller_id,
+          amount: p.amount,
+          currency: p.currency.trim(),
+          attempt,
+        }));
+        this.metrics.providerCalls.inc({ ...labels, outcome: 'success' });
+      } catch (err) {
+        this.metrics.providerCalls.inc({ ...labels, outcome: err instanceof ProviderRejectedError ? 'rejected' : 'error' });
+        throw err;
+      } finally {
+        stopTimer();
+      }
       await client.query('UPDATE payouts SET attempts = $2, provider_ref = $3, updated_at = now() WHERE id = $1', [payoutId, attempt, payoutRef]);
     });
   }
@@ -277,12 +293,20 @@ export class PayoutsService {
     return toView(r.rows[0]);
   }
 
-  async list(sellerId?: string) {
-    const r = await this.db.query<PayoutRow>(
-      'SELECT * FROM payouts WHERE ($1::text IS NULL OR seller_id = $1) ORDER BY created_at DESC LIMIT 200',
-      [sellerId ?? null],
+  async list(q: { limit?: number; cursor?: string; sellerId?: string; status?: string; provider?: string }): Promise<Page<ReturnType<typeof toView>>> {
+    const limit = resolveLimit(q.limit);
+    const cursor = decodeCursor<{ t: string; i: string }>(q.cursor, { t: 'string', i: 'string' }, (c) => isPgTimestamp(c.t) && isUuid(c.i));
+    const w = new Where();
+    if (q.sellerId) w.add('seller_id = ?', q.sellerId);
+    if (q.status) w.add('status = ?', q.status);
+    if (q.provider) w.add('provider = ?', q.provider);
+    if (cursor) w.addMany('(created_at, id) < (?1::timestamptz, ?2::uuid)', [cursor.t, cursor.i]);
+    const r = await this.db.query<PayoutRow & { cursor_ts: string }>(
+      `SELECT *, created_at::text AS cursor_ts FROM payouts ${w.sql} ORDER BY created_at DESC, id DESC LIMIT ${w.param(limit + 1)}`,
+      w.params,
     );
-    return r.rows.map(toView);
+    const page = pageOf(r.rows, limit, (row) => ({ t: row.cursor_ts, i: row.id }));
+    return { data: page.data.map(toView), nextCursor: page.nextCursor };
   }
 
   async sellerBalance(sellerId: string, currency: string, asOf: Date = new Date()) {
@@ -298,6 +322,8 @@ export class PayoutsService {
       sellerId,
       currency,
       ledgerBalance,
+      /** What the seller owes the platform (a refund or lost dispute after payout); netted against future sales. */
+      owesPlatform: Math.max(0, -ledgerBalance),
       availableForPayout: available,
       heldOrReserved: Math.max(0, ledgerBalance - available),
       reserve,

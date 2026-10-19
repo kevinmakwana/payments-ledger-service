@@ -58,3 +58,15 @@ jobs:
         run: npm run build
       - name: Offline demo
         run: npm run demo
+      - name: Docker image builds and boots
+        run: |
+          docker build -t payments-ledger-service:ci .
+          docker run -d --name app --network host \
+            -e NODE_ENV=production -e API_KEYS=sk_admin_ci_0123456789abcdef:admin \
+            -e DATABASE_URL -e REDIS_URL -e PORT=3055 -e QUEUE_PREFIX=ci-smoke \
+            payments-ledger-service:ci
+          for i in $(seq 1 30); do curl -fsS localhost:3055/health/ready && break; sleep 1; done
+          curl -fsS localhost:3055/health/ready
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3055/payments)" = 401
+          docker logs app | tail -5
+          docker rm -f app

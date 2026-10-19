@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, LoggerService } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { NestFactory } from '@nestjs/core';
 import { randomUUID } from 'crypto';
@@ -31,7 +31,7 @@ export interface TestApp {
   close: () => Promise<void>;
 }
 
-export async function startApp(env: Record<string, string> = {}): Promise<TestApp> {
+export async function startApp(env: Record<string, string> = {}, opts: { logger?: LoggerService } = {}): Promise<TestApp> {
   Object.assign(process.env, {
     // Isolated queues per run, no wall-clock schedulers, fast retries.
     QUEUE_PREFIX: `test-${randomUUID().slice(0, 8)}`,
@@ -44,10 +44,12 @@ export async function startApp(env: Record<string, string> = {}): Promise<TestAp
     PAYOUT_MIN_MINOR: '100',
     PAYOUT_MAX_ATTEMPTS: '2',
     PLATFORM_FEE_BPS: '1000',
+    PAYMENT_RECOVERY_AGE_MS: '0', // tests call the recovery sweep directly and expect it to act at once
+    PROVIDER_OP_LEASE_MS: '2000',
     RATE_LIMIT_MAX: '100000', // suites hammer the API from one IP; edge-protection tests lower it
     ...env,
   });
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, logger: ['error', 'warn'] });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, logger: opts.logger ?? ['error', 'warn'] });
   configureApp(app);
   await app.listen(0);
   const url = (await app.getUrl()).replace('[::1]', '127.0.0.1');

@@ -27,3 +27,6 @@ export class InvalidAmountError extends UnprocessableEntityException {
     super({ code: 'invalid_amount', message });
   }
 }
+
+/** Thrown for "not yet" conditions while handling a webhook (e.g. our DB has not committed the payment yet): the queue retries with backoff. */
+export class RetryableWebhookError extends Error {}

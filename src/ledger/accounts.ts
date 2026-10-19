@@ -34,6 +34,20 @@ export const payoutsInTransit = (currency: string): AccountRef => ({
   currency,
 });
 
+/** Money the provider withdrew for an open dispute and that we may win back (a receivable from the provider). */
+export const disputedFunds = (currency: string): AccountRef => ({
+  code: `platform:disputed_funds:${currency}`,
+  type: 'asset',
+  currency,
+});
+
+/** The seller's share of open disputes, withheld from their payable balance until the dispute resolves. */
+export const disputeHolds = (currency: string): AccountRef => ({
+  code: `platform:dispute_holds:${currency}`,
+  type: 'liability',
+  currency,
+});
+
 /** Signed ledger sum -> the balance in the account's natural direction. */
 export function naturalBalance(type: AccountType, signedSum: number): number {
   return type === 'asset' || type === 'expense' ? signedSum : -signedSum;

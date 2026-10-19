@@ -33,6 +33,8 @@ If you changed the ports, export matching `DATABASE_URL` / `REDIS_URL` (see `.en
 
 ### Charge flow
 
+The provider is never called inside a database transaction. A short transaction records the *intent* (the payment and a row in the `provider_operations` outbox); the provider call then runs outside any transaction with a deterministic idempotency key; a second short transaction applies the result (state change and ledger posting) atomically. Every step is idempotent and state-driven, so a crash anywhere is repaired by driving the payment forward again.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -40,25 +42,29 @@ sequenceDiagram
     participant API as POST /payments
     participant DB as Postgres
     participant P as Provider (simulated / Stripe / Razorpay)
-    participant Q as BullMQ
+    participant R as Recovery worker
     B->>API: POST /payments (Idempotency-Key, capture=true)
-    API->>DB: BEGIN; insert idempotency key (blocks concurrent duplicates)
-    API->>DB: insert payment (created)
-    API->>P: authorize
-    API->>DB: payment -> authorized
-    API->>DB: lock payment row (FOR UPDATE)
-    API->>P: capture
-    API->>DB: ledger entry: Dr clearing 100 / Cr seller 90 / Cr fees 10
-    API->>DB: payment -> captured; store response; COMMIT
-    API-->>B: 201 payment
-    P--)API: POST /webhooks/simulated (HMAC-signed payment.captured)
-    API->>API: verify signature + timestamp tolerance
-    API->>DB: insert webhook_events (dedupe on provider+event id)
-    API->>Q: enqueue (retries, exponential backoff)
-    API-->>P: 202
-    Q->>DB: worker marks capture confirmed by provider
-    Note over Q,DB: after N failed attempts the event is dead-lettered
+    API->>DB: tx 1: insert idempotency key + payment (created) + outbox op authorize:ID; COMMIT
+    API->>DB: claim op (in_flight, with a lease)
+    API->>P: authorize (idempotency key authorize:ID, no DB transaction held)
+    alt declined
+        API->>DB: tx 2: payment -> failed (recorded), op failed
+        API-->>B: 402 payment_declined (replayed for the same key)
+    else authorized
+        API->>DB: tx 2: payment -> authorized, op succeeded
+        API->>DB: tx 3: payment -> capturing + outbox op capture:ID:1
+        API->>P: capture (idempotency key capture:ID:1)
+        API->>DB: tx 4: ledger entry Dr clearing 100 / Cr seller 90 / Cr fees 10; payment -> captured
+        API-->>B: 201 payment
+    end
+    Note over API,R: crash, timeout or unknown outcome at any point: the op stays pending/in_flight
+    R->>DB: payments idle in created / capturing / voiding, refunds pending
+    R->>P: same call, same idempotency key (provider returns the same result)
+    R->>DB: apply result once
+    Note over B,API: a retry with the same Idempotency-Key resumes the same payment instead of starting over
 ```
+
+Webhook intake and processing are described under *Webhooks* below.
 
 ### Payout flow
 
@@ -94,21 +100,34 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/payments` | Create and authorize a payment, optionally `capture: true`. Requires `Idempotency-Key`. |
+| POST | `/payments` | Create and authorize a payment, optionally `capture: true`. Requires `Idempotency-Key`. `402` if declined (the failed attempt is recorded); `504` if the provider timed out (retry with the same key). |
+| GET | `/payments` | List payments, newest first. Filters: `sellerId`, `buyerId`, `status`, `provider`, `createdFrom`, `createdTo`. |
 | GET | `/payments/:id` | Fetch a payment. |
 | POST | `/payments/:id/capture` | Capture an authorized payment; posts the fee split to the ledger. `Idempotency-Key` optional: with it, a retry replays the first response instead of returning `409`. |
+| POST | `/payments/:id/void` | Cancel an authorized payment. `Idempotency-Key` optional. |
 | POST | `/payments/:id/refunds` | Full or partial refund (`amount` optional). Requires `Idempotency-Key`. |
 | POST | `/webhooks/:provider` | Provider webhook intake (HMAC + timestamp tolerance, dedupe, async processing). |
-| GET | `/webhooks/dead-letters` | Events that exhausted their retries. |
+| GET | `/webhooks/dead-letters` | Events that exhausted their retries (paginated). |
 | POST | `/webhooks/dead-letters/:provider/:eventId/retry` | Re-queue a dead-lettered event. |
 | POST | `/payouts/run` | Run the payout batch now (`asOf` optional, for backfills/demos). |
-| GET | `/payouts`, `/payouts/:id` | List / fetch payouts. |
+| GET | `/payouts` | List payouts, newest first. Filters: `sellerId`, `status`, `provider`. |
+| GET | `/payouts/:id` | Fetch a payout. |
+| GET | `/disputes` | List disputes (chargebacks). Filters: `status`, `paymentId`, `provider`. |
 | GET | `/sellers/:sellerId/balance` | Ledger balance and the amount available for payout. |
 | GET | `/reports/reconciliation?date=YYYY-MM-DD` | Provider vs ledger mismatch report for a UTC day. |
 | GET | `/ledger/trial-balance` | All balances plus proof that postings sum to zero. |
 | GET | `/ledger/accounts/:code` | One account's balance (cached and derived). |
+| GET | `/ledger/accounts/:code/statement` | The account's postings, newest first, each with the running balance after it. |
+| GET | `/ledger/entries` | Journal entries with their postings. Filters: `kind`, `paymentId`, `payoutId`, `accountCode`, `from`, `to`. |
+| GET | `/metrics` | Prometheus metrics. Admin key required. |
 | GET | `/health/live` | Liveness: the process is serving. Never touches dependencies. |
 | GET | `/health/ready`, `/health` | Readiness: `200` when Postgres and Redis answer, `503` with per-dependency `up`/`down` otherwise. |
+
+### Pagination
+
+Every list endpoint returns `{ "data": [...], "nextCursor": "..." | null }` and accepts `?limit=` (1 to 200, default 50) and `?cursor=` (pass the previous `nextCursor`). Pagination is **keyset**, not offset: a cursor encodes the sort key of the last row, so pages neither skip nor repeat rows when new ones arrive between requests, and deep pages cost the same as the first. Cursors are opaque; a tampered or malformed one is `400 invalid_cursor`. Unknown query parameters and invalid filter values are `400`. Account statements carry the running balance in the cursor, so `balanceAfter` chains exactly across pages even while new postings arrive.
+
+**Breaking change from the earlier API:** `GET /payouts` and `GET /webhooks/dead-letters` used to return a bare array capped at 200; they now return the envelope above.
 
 ## Correctness guarantees
 
@@ -124,8 +143,10 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 - The request body is hashed canonically (key order independent). Same key with a different body returns `409`.
 
 **State machine and concurrency**
-- `created → authorized → captured → partially_refunded/refunded`; every other transition is rejected with `409`.
-- Capture and refund lock the payment row (`SELECT … FOR UPDATE`) and also check a `version` column on update. 20 parallel captures produce exactly one capture and one ledger entry; parallel refunds can never exceed the captured amount.
+- `created → authorized → capturing → captured → partially_refunded/refunded`, plus `created → failed` (declined), `authorized → voiding → voided | expired`; every other transition is rejected with `409`. `created`, `capturing` and `voiding` are *in flight*: a provider call is pending or being retried.
+- A declined authorization is **recorded** (status `failed`, `failureCode`, `failureMessage`) and answered `402 payment_declined`; the same key replays the same `402`. A declined capture leaves the payment `authorized` (`402 capture_declined`); a declined refund is `422 refund_rejected` and releases its reservation. Only a *definitive* refusal (declined card, invalid request) counts as a decline. Timeouts, 5xx, 429 and bad credentials mean "outcome unknown": the payment stays in flight, the request answers 5xx/`504`, and a retry or the recovery worker finishes it. They are never shown to the customer as a decline.
+- `POST /payments/:id/void` cancels an authorization (Stripe: cancels the PaymentIntent; Razorpay releases uncaptured authorizations itself, so it answers `422 void_rejected`). Authorizations not captured within `AUTHORIZATION_TTL_HOURS` (default 7 days) are voided automatically and marked `expired`.
+- Capture and refund lock the payment row (`SELECT … FOR UPDATE`) and also check a `version` column on update. 20 parallel captures produce exactly one capture and one ledger entry (the winner moves the payment to `capturing`; the rest get `409`). A refund first *reserves* its amount as a `pending` refund row under that lock, so parallel refunds can never exceed the captured amount even while a provider call is still in flight.
 - Partial refunds return the fee pro rata on the *cumulative* refunded amount, so any sequence of refunds sums to exactly the original fee.
 
 **Webhooks**
@@ -133,13 +154,20 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 - Deduped by `(provider, event id)`. If a first delivery stored the event but failed to enqueue, a redelivery re-enqueues it (deterministic job ids prevent double jobs).
 - Processed asynchronously with exponential backoff; after the last attempt the event is marked `dead` and added to the dead-letter queue. Handlers are idempotent.
 
+**Disputes (chargebacks)**
+- `dispute.opened`, `dispute.won` and `dispute.lost` webhooks (Stripe `charge.dispute.created` / `charge.dispute.closed`, Razorpay `payment.dispute.created` / `.won` / `.lost`) are ledger events. When the provider withdraws the money, it moves from the provider balance to `platform:disputed_funds` (a receivable) and the seller's share is withheld from their payable balance into `platform:dispute_holds`, so it cannot be paid out meanwhile; the platform fee share stays in revenue until the outcome. **Won:** everything is reversed exactly. **Lost:** the receivable is written off, the seller bears their share and the platform returns its fee share, which is exactly the effect of a refund (a property test checks this).
+- Disputes are idempotent (the provider's dispute id is unique) and tolerant of ordering: an outcome that arrives before the opening, or an opening for a payment we have not committed yet, is retried by the webhook queue and dead-lettered with an alert if it never resolves. Stripe `warning_*` statuses are inquiries (no funds withdrawn) and never touch the ledger.
+- Money under an open dispute, or lost to one, is excluded from what can be refunded, so it cannot be paid out twice.
+- **Negative balances:** a refund or lost dispute after payout can leave a seller owing the platform. `GET /sellers/:id/balance` reports `owesPlatform`; nothing is payable until new sales cover the debt, and payouts net it automatically (new sales minus what is owed, minus the reserve). The monitor raises a `seller_negative_balance` warning so a human can decide whether to collect sooner.
+- `payment.failed` (Stripe `payment_intent.payment_failed`, Razorpay `payment.failed`) marks a not-yet-captured payment `failed`. For money that was already captured it raises a critical `payment_failed_after_capture` alert and changes nothing, because money may already have moved. Not modelled yet: provider dispute fees, and Razorpay `payment.dispute.closed` / `under_review` (stored, not acted on). The Razorpay dispute payloads follow Razorpay's published docs; the `lost` sample could not be confirmed, and like the other live drivers they have not been exercised against the real API.
+
 **Payouts and reconciliation**
 - Payable = credits older than the hold period − all debits − reserve, floored at zero. Concurrent batches serialize on the seller's balance row.
 - **Payouts go back out through the provider that took the money.** The seller-level total (and its single reserve) is unchanged, but it is split into one payout per provider, largest first, and a provider is never asked to pay out more than it took in for that seller (a refund counts against the provider of its payment, a payout against the provider that carried it). A leg below `PAYOUT_MIN_MINOR` is skipped and left for a later run. Note for existing databases: payouts created before this change were all attributed to the default provider, so on a database that already paid out money taken by another provider, the first run could pay that money out again; start from a clean ledger or reconcile first.
 - Payout state is `pending → paid | failed`; failed payouts retry with backoff, and permanent failure reverses the ledger entry so the money returns to the seller.
 - Reconciliation matches provider transactions to ledger entries by provider reference and reports `missing_in_ledger`, `missing_at_provider` and `amount_mismatch`.
 
-**Known simplifications** (deliberate, see Next steps): the provider call happens inside the DB transaction (a crash between a provider success and our commit is exactly what reconciliation exists to catch); a refund can drive a seller balance negative after payout; a single provider fee model; reconciliation buckets by UTC day of creation, so events near midnight can show as one-day timing differences.
+**Known simplifications** (deliberate, see Next steps): a refund can drive a seller balance negative after payout; a single provider fee model; reconciliation buckets by UTC day of creation, so events near midnight can show as one-day timing differences.
 
 ## Authentication
 
@@ -155,17 +183,48 @@ Missing or unknown key: `401 {"code":"unauthorized"}`. Client key on an admin ro
 
 With `API_KEYS` unset, authentication is **off** and the app logs a warning at startup (this keeps `npm run demo` and local dev frictionless). With `NODE_ENV=production` the app refuses to start without keys unless you set `ALLOW_UNAUTHENTICATED=true` on purpose. Keys live in the environment for now; hashed, rotatable keys in the database are a natural next step.
 
+## Deployment
+
+One image, two tiers. The API tier scales with request volume; the worker tier scales with queue volume; both come from the same `Dockerfile` (multi-stage, Node 22 alpine, runs as the unprivileged `node` user, about 224 MB, `node` as PID 1 so SIGTERM triggers graceful shutdown).
+
+| `APP_ROLE` | Runs | Listens on |
+| --- | --- | --- |
+| `all` (default) | HTTP API and queue workers and schedulers in one process (local dev, the demo, small installs) | `PORT` (3000) |
+| `api` | HTTP API only. It queues work but processes none, and never registers the scheduled jobs | `PORT` (3000) |
+| `worker` | BullMQ workers and schedulers only (webhook processing, payouts, reconciliation, monitor, retention, payment recovery) | `WORKER_PORT` (3001): `/health/live`, `/health/ready` and `/metrics` (admin key if `API_KEYS` is set). **Internal only**; it is not an API |
+
+Run any number of each. Workers are safe to scale out (BullMQ distributes jobs; scheduled jobs are registered under fixed ids so they fire once per tick however many workers exist; payout, webhook and payment operations are idempotent and claimed with leases). Migrations run at startup under a Postgres advisory lock, so several instances starting together are fine.
+
+```bash
+docker build -t payments-ledger-service .
+cp deploy/prod.env.example deploy/prod.env        # fill in real secrets (git-ignored)
+docker compose -f deploy/docker-compose.prod.yml --env-file deploy/prod.env up -d --build --wait
+docker compose -f deploy/docker-compose.prod.yml --env-file deploy/prod.env up -d --scale api=3 --scale worker=2
+```
+
+[deploy/docker-compose.prod.yml](deploy/docker-compose.prod.yml) is a production-shaped stack: `api` and `worker` services, Postgres and Redis with persistent volumes (Redis with AOF and a password, because queue state and schedules live there), required secrets enforced at `up` time, nothing but the API published. `NODE_ENV=production` makes the app refuse to start without `API_KEYS` and switches logs to JSON. This stack was built and exercised end to end (payment, worker-processed webhook, worker-dispatched payout, balanced ledger, worker port unreachable from the host).
+
+For an orchestrator: liveness `GET /health/live` and readiness `GET /health/ready` on `PORT` for `api`, and on `WORKER_PORT` for `worker`; give `worker` a longer termination grace period than `api` (in-flight jobs finish on SIGTERM); terminate TLS and put a load balancer in front of `api`, and set `TRUST_PROXY` to the number of proxy hops. Kubernetes manifests are not included because they could not be validated here. Behind separate processes the simulated provider needs `SIMULATED_WEBHOOK_BASE_URL` (the compose file sets it); real providers deliver to your public webhook URL and need nothing.
+
 ## Operations
 
+- **Observability:**
+  - *Request ids and tracing.* Every response carries `X-Request-Id` (the caller's if it is 1 to 64 chars of `[A-Za-z0-9._-]`, otherwise generated). An inbound W3C `traceparent` is continued, and the same trace id is sent on outgoing provider and alert calls (new span id each time) and appears in every log line of that request. This is trace-context propagation only: spans are not exported, so adding the OpenTelemetry SDK later is a drop-in on top of ids that already exist.
+  - *Logs.* `LOG_FORMAT=json` (the default when `NODE_ENV=production`) writes one JSON object per line (`ts`, `level`, `context`, `msg`, `requestId`, `traceId`); `pretty` is Nest's coloured console for local development. `LOG_LEVEL` is `info` by default. One `http_request` line per request records method, route *pattern*, status and duration; never the query string, headers or body, and health/metrics probes are not logged.
+  - *Errors.* Every error has one shape: `{ "statusCode", "code", "message", "requestId", ...domain fields }`. Domain codes (`idempotency_key_reuse`, `provider_timeout`, ...) and extra fields are preserved. Anything unexpected is an opaque `500 internal_error`; the real cause and stack go to the log under the same request id, never to the client.
+  - *Metrics.* `GET /metrics` (Prometheus text format, **admin key required**, so give your scraper `authorization` credentials). Counters and histograms: `http_requests_total` and `http_request_duration_seconds` (labelled by route pattern, never raw ids), `provider_calls_total{provider,operation,outcome=success|rejected|error}`, `provider_call_duration_seconds`, `alerts_total{kind,severity}`. Gauges computed at scrape time from Postgres/Redis: `queue_jobs{queue,state}` (all queues including the webhook dead-letter queue), `webhook_events_dead`, `payments_in_flight{status}`, `provider_operations_open{status}`, `payouts_pending`; `ledger_consistent` (1/0, from the last monitor run); plus the default process metrics. Good starting alerts: `webhook_events_dead > 0`, `ledger_consistent == 0`, `payments_in_flight` or `provider_operations_open` not draining, and the `error` outcome rate of `provider_calls_total`.
 - **Health:** point liveness probes at `/health/live` and readiness probes at `/health/ready`. A dependency outage fails readiness (traffic stops) but not liveness (no restart loop). Responses say which dependency is down, never why; the reason is in the logs.
 - **Provider timeouts:** every Stripe/Razorpay call has a deadline (`PROVIDER_TIMEOUT_MS`, default 15 s) covering the connection and the response body. Provider calls run inside DB transactions, so a hung provider would otherwise hold row locks and pool connections. A timeout returns `504 provider_timeout` and rolls back; retrying with the same `Idempotency-Key` is safe.
 - **Alerts:** every alert is logged as one `ALERT {json}` error line and, if `ALERT_WEBHOOK_URL` is set, POSTed as JSON (`service`, `at`, `kind`, `severity`, `message`, `details`). Alerting never fails or stalls the job that raised it. Kinds:
   - `reconciliation_mismatch` (critical): the nightly reconciliation found mismatches.
   - `webhook_dead_lettered` (warning): an event exhausted its retries.
   - `webhook_dlq_depth` (warning): dead letters at or above `ALERT_DLQ_THRESHOLD`.
+  - `seller_negative_balance` (warning): sellers owe the platform money after a refund or lost dispute.
+  - `payment_failed_after_capture` (critical): the provider reported a failure for money that was already captured.
   - `ledger_drift` (critical): cached balances disagree with postings, or postings do not sum to zero.
 
   The last two come from a monitor job (`MONITOR_CRON`, default every 15 minutes, UTC) that runs on the same shared schedule as the other jobs.
+- **Outbox and recovery:** each provider call is a `provider_operations` row claimed with a lease (`PROVIDER_OP_LEASE_MS`, default 60 s; a claim older than that is treated as a crashed executor and taken over). A recovery job (`PAYMENT_RECOVERY_CRON`, default every minute) drives payments and refunds that have been idle for `PAYMENT_RECOVERY_AGE_MS` (default 60 s) to completion, expires stale authorizations, and raises a `provider_operation_stuck` critical alert for operations still open after `PROVIDER_OP_MAX_ATTEMPTS` (default 10) attempts. Provider idempotency keys are deterministic (`authorize:<payment>`, `capture:<payment>:<attempt>`, `refund:<refund>`, `void:<payment>:<attempt>`; capture and void are per attempt because a provider replays the saved result of a reused key, even a failed one).
 - **Retention:** a daily job (`MAINTENANCE_CRON`, default 04:00 UTC) deletes, in small batches, idempotency keys older than `IDEMPOTENCY_KEY_TTL_HOURS` (default 168 = 7 days; a client reusing a key after that would create a duplicate, so keep it longer than any client retry window) and *processed* webhook events older than `WEBHOOK_RETENTION_DAYS` (default 30; far longer than providers retry deliveries, and handlers are idempotent anyway). Events still `received` or dead-lettered are never purged.
 - **Edge protection:** `helmet` security headers (CSP is off because this is a JSON API and Swagger UI needs inline scripts); JSON bodies over `BODY_LIMIT` (default `256kb`) get `413`; each client IP may make `RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW_MS` (default 300 per minute) before `429` with `Retry-After`. Limiting is keyed by IP, not API key, and runs *before* authentication, so guessing keys is throttled and presenting a different key never buys a fresh budget. `/health/*` and provider webhooks are exempt. Counters are in memory, so the limit is per instance; behind a load balancer set `TRUST_PROXY` to the number of proxy hops so the real client IP is used.
 - **Payout sweeper:** every `PAYOUT_SWEEP_CRON` (default 10 min) a job looks for payouts the happy path lost. A `pending` payout with no provider reference for longer than `PAYOUT_STALE_MS` (default 30 min; keep it well above `PAYOUT_RETRY_BACKOFF_MS`) had its dispatch job lost, so it is re-dispatched; rows are claimed atomically so overlapping sweeps cannot double-enqueue. A payout the provider accepted but never reported on for `PAYOUT_AWAITING_PROVIDER_MS` (default 24 h) raises a `payout_awaiting_provider` critical alert on every sweep until someone resolves it. It is deliberately not retried, because retrying could pay twice.
@@ -176,11 +235,11 @@ With `API_KEYS` unset, authentication is **off** and the app logs a warning at s
 ```bash
 npm test            # unit tests: state machine, signatures, payout math, reconciliation, ledger properties (no services needed)
 npm run test:e2e    # e2e against real Postgres + Redis; skipped locally unless DATABASE_URL and REDIS_URL are set, but a hard FAILURE when CI=true
-npm run test:e2e:cov # e2e with a coverage gate (statements 80%, branches 60%, functions 80%, lines 82%; lcov in ./coverage)
+npm run test:e2e:cov # e2e with a coverage gate (statements 84%, branches 66%, functions 83%, lines 87%; lcov in ./coverage)
 npm run typecheck && npm run lint && npm run build
 ```
 
-Coverage is measured on the e2e run, because that is the suite that exercises the real app (about 86% of statements; unit tests alone cover the pure logic, about 27%). CI fails below the gate and uploads the lcov report as an artifact. Raise the thresholds in `test/jest-e2e.json` as coverage grows.
+Coverage is measured on the e2e run, because that is the suite that exercises the real app (about 88% of statements; unit tests alone cover the pure logic). CI fails below the gate and uploads the lcov report as an artifact. Raise the thresholds in `test/jest-e2e.json` as coverage grows.
 
 **Failure injection** (`test/failure-injection.e2e-spec.ts`) breaks a step of a flow and asserts what remains: a crash after the provider captured but before our commit rolls everything back, leaves the idempotency key reusable and shows up in reconciliation as `missing_in_ledger`; a refund that dies before commit changes nothing; provider errors and timeouts (`504`) leave no trace; a webhook that was stored but never enqueued is picked up by its redelivery. The "payout batch committed but its dispatch job was lost" crash is covered by the sweeper tests.
 
@@ -209,16 +268,14 @@ The Stripe and Razorpay drivers implement the same `PaymentProvider` interface a
 
 All via environment variables, see [.env.example](.env.example): fee (`PLATFORM_FEE_BPS`), `PAYOUT_HOLD_DAYS`, `PAYOUT_RESERVE_MINOR`, `PAYOUT_MIN_MINOR`, `PAYOUT_MAX_ATTEMPTS`, webhook tolerance / attempts / backoff, and `SCHEDULERS_ENABLED`.
 
-Auth: `API_KEYS`, `ALLOW_UNAUTHENTICATED`. Edge: `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `BODY_LIMIT`, `TRUST_PROXY`. Retention: `IDEMPOTENCY_KEY_TTL_HOURS`, `WEBHOOK_RETENTION_DAYS`, `MAINTENANCE_CRON`. Payout sweeper: `PAYOUT_STALE_MS`, `PAYOUT_AWAITING_PROVIDER_MS`, `PAYOUT_SWEEP_CRON`. Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
+Auth: `API_KEYS`, `ALLOW_UNAUTHENTICATED`. Process: `APP_ROLE`, `WORKER_PORT`, `SIMULATED_WEBHOOK_BASE_URL`. Logging: `LOG_FORMAT`, `LOG_LEVEL`. Edge: `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `BODY_LIMIT`, `TRUST_PROXY`. Outbox: `PROVIDER_OP_LEASE_MS`, `PROVIDER_OP_MAX_ATTEMPTS`, `PAYMENT_RECOVERY_AGE_MS`, `PAYMENT_RECOVERY_CRON`, `AUTHORIZATION_TTL_HOURS`. Retention: `IDEMPOTENCY_KEY_TTL_HOURS`, `WEBHOOK_RETENTION_DAYS`, `MAINTENANCE_CRON`. Payout sweeper: `PAYOUT_STALE_MS`, `PAYOUT_AWAITING_PROVIDER_MS`, `PAYOUT_SWEEP_CRON`. Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
 
 ## Next steps
 
-- Transactional outbox for provider calls (authorize/capture outside the DB transaction, reconciled via the outbox state)
 - Multi-currency payouts and FX postings; per-seller reserve policies
-- Chargebacks/disputes as ledger events; negative-balance recovery
 - Per-tenant API keys stored hashed in the database, key rotation, and a shared (Redis) rate-limit store
 - Reconciliation: a mismatch resolution workflow and auto-matching of late webhooks (reports are already persisted per provider and day, and mismatches raise an alert)
-- Metrics and tracing (queue depth, DLQ size, ledger drift); DLQ depth and ledger drift already alert through the monitor job
+- OpenTelemetry span export (trace context is already propagated)
 
 ## License
 

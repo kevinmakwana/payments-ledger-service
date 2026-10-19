@@ -2,6 +2,8 @@ import { ServerResponse } from 'http';
 import { FakeHttp, respondJson, startFakeHttp } from '../../test/fake-http';
 import { ProviderTimeoutError } from '../common/errors';
 import { loadConfig } from '../config/config';
+import { ProviderRejectedError } from './provider.interface';
+import { hmacHex } from './signature';
 import { RazorpayProvider } from './razorpay.provider';
 
 let fake: FakeHttp | undefined;
@@ -24,6 +26,63 @@ const providerFor = (apiBase: string, timeoutMs = 10_000) =>
   );
 
 const authorizeReq = { paymentId: 'p1', amount: 1000, currency: 'INR', idempotencyKey: 'k1', paymentMethod: 'pay_1' };
+
+describe('RazorpayProvider webhook mapping (disputes and failures)', () => {
+  const NOW = 1_800_000_000;
+  const parse = (event: string, payload: Record<string, unknown>) => {
+    const body = JSON.stringify({ event, created_at: NOW, payload });
+    const headers = { 'x-razorpay-signature': hmacHex('whsec_x', body), 'x-razorpay-event-id': 'evt_rzp_1' };
+    return providerFor('http://unused').parseWebhook(Buffer.from(body), headers, NOW);
+  };
+  const dispute = { entity: { id: 'disp_1', payment_id: 'pay_1', amount: 7000, currency: 'INR', reason_code: 'goods_services_not_received' } };
+
+  it.each([
+    ['payment.dispute.created', 'dispute.opened'],
+    ['payment.dispute.won', 'dispute.won'],
+    ['payment.dispute.lost', 'dispute.lost'],
+  ])('maps %s to %s with the dispute and payment references', (event, type) => {
+    expect(parse(event, { dispute })).toMatchObject({
+      id: 'evt_rzp_1',
+      type,
+      data: { disputeRef: 'disp_1', providerRef: 'pay_1', amount: 7000, currency: 'INR', reason: 'goods_services_not_received' },
+    });
+  });
+
+  it('maps payment.failed with the provider\'s error description', () => {
+    expect(parse('payment.failed', { payment: { entity: { id: 'pay_9', error_description: 'Bank declined' } } })).toMatchObject({
+      type: 'payment.failed',
+      data: { providerRef: 'pay_9', reason: 'Bank declined' },
+    });
+  });
+});
+
+describe('RazorpayProvider error classification and void', () => {
+  const failing = async (status: number, error: Record<string, unknown>) => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, status, { error }));
+    return providerFor(fake.url).capture({ paymentId: 'p', providerRef: 'pay_1', amount: 100, currency: 'INR', idempotencyKey: 'k' }).catch((e) => e);
+  };
+
+  it('treats 400 BAD_REQUEST_ERROR as a definitive rejection with Razorpay\'s code', async () => {
+    const err = await failing(400, { code: 'BAD_REQUEST_ERROR', description: 'The payment has already been captured' });
+    expect(err).toBeInstanceOf(ProviderRejectedError);
+    expect(err).toMatchObject({ code: 'BAD_REQUEST_ERROR', message: 'The payment has already been captured' });
+  });
+
+  it.each([[500], [502], [429], [401]])('does not treat %s as a rejection (retry / operational)', async (status) => {
+    const err = await failing(status, { code: 'SERVER_ERROR', description: 'boom' });
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ProviderRejectedError);
+  });
+
+  it('cannot void: Razorpay releases uncaptured authorizations itself, so voiding is a definitive refusal and makes no API call', async () => {
+    fake = await startFakeHttp((_req, res) => respondJson(res, 200, {}));
+    await expect(providerFor(fake.url).void({ paymentId: 'p', providerRef: 'pay_1', idempotencyKey: 'k' })).rejects.toMatchObject({
+      name: 'ProviderRejectedError',
+      code: 'void_not_supported',
+    });
+    expect(fake.requests).toHaveLength(0);
+  });
+});
 
 describe('RazorpayProvider payout idempotency', () => {
   const payout = { payoutId: '8c1f0c52-6f55-4e0e-9f3c-6f1a7a1d2b3c', sellerId: 'fa_123', amount: 5000, currency: 'INR' };

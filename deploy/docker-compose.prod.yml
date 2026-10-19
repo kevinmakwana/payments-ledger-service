@@ -1,0 +1,89 @@
+# Production-shaped stack: one image, an API tier and a worker tier that scale independently.
+#
+#   cp deploy/prod.env.example deploy/prod.env    # then fill in real secrets
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/prod.env up -d --build --wait
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/prod.env up -d --scale api=3 --scale worker=2
+#
+# Put a load balancer / TLS terminator in front of `api` (set TRUST_PROXY to its hop count so rate limits see real
+# client IPs). Never publish `worker` (its probe/metrics port is internal) or Postgres/Redis.
+name: payments-ledger
+
+x-app: &app
+  build:
+    context: ..
+  image: payments-ledger-service:${IMAGE_TAG:-latest}
+  restart: unless-stopped
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  environment: &env
+    NODE_ENV: production
+    DATABASE_URL: postgres://${POSTGRES_USER:-ledger}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ledger}
+    REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+    API_KEYS: ${API_KEYS:?set API_KEYS (key:role,...)}
+    DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-simulated}
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    TRUST_PROXY: ${TRUST_PROXY:-}
+    STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+    STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+    RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+    RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+    RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+    RAZORPAY_X_ACCOUNT_NUMBER: ${RAZORPAY_X_ACCOUNT_NUMBER:-}
+    SIMULATED_WEBHOOK_SECRET: ${SIMULATED_WEBHOOK_SECRET:-whsec_simulated_dev}
+    # The simulated provider (demo/staging only) posts its webhooks here, from whichever tier calls it.
+    SIMULATED_WEBHOOK_BASE_URL: http://api:3000
+
+services:
+  api:
+    <<: *app
+    environment:
+      <<: *env
+      APP_ROLE: api
+      PORT: 3000
+    ports:
+      - "${API_PORT:-3000}:3000"
+    stop_grace_period: 30s
+
+  worker:
+    <<: *app
+    environment:
+      <<: *env
+      APP_ROLE: worker
+      WORKER_PORT: 3001
+    # No published ports: probes and Prometheus reach 3001 over the internal network.
+    stop_grace_period: 60s
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-ledger}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ledger}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Queue state (webhooks, payouts, schedules) lives here: persist it.
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+
+volumes:
+  pgdata:
+  redisdata:

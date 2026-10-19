@@ -1,19 +1,21 @@
 import { Injectable } from '@nestjs/common';
+import { RetryableWebhookError } from '../common/errors';
 import { DbService } from '../db/db.service';
-import { WebhookEvent } from '../providers/provider.interface';
+import { DisputesService } from '../disputes/disputes.service';
+import { PaymentsService } from '../payments/payments.service';
 import { PayoutsService } from '../payouts/payouts.service';
-
-/** Thrown for "not yet" conditions (e.g. our DB hasn't committed the capture): the queue retries with backoff. */
-export class RetryableWebhookError extends Error {}
+import { WebhookEvent } from '../providers/provider.interface';
 
 @Injectable()
 export class WebhookHandlers {
   constructor(
     private readonly db: DbService,
     private readonly payouts: PayoutsService,
+    private readonly disputes: DisputesService,
+    private readonly payments: PaymentsService,
   ) {}
 
-  async handle(event: WebhookEvent): Promise<void> {
+  async handle(provider: string, event: WebhookEvent): Promise<void> {
     switch (event.type) {
       case 'payment.captured': {
         const r = await this.db.query(
@@ -29,6 +31,16 @@ export class WebhookHandlers {
         if (r.rowCount === 0) throw new RetryableWebhookError(`Refund ${event.data.refundRef} not recorded yet`);
         return;
       }
+      case 'payment.failed':
+        await this.payments.failFromProvider(provider, event.data.providerRef, event.data.reason);
+        return;
+      case 'dispute.opened':
+        await this.disputes.open(provider, event);
+        return;
+      case 'dispute.won':
+      case 'dispute.lost':
+        await this.disputes.resolve(provider, event, event.type === 'dispute.won' ? 'won' : 'lost');
+        return;
       case 'payout.paid':
       case 'payout.failed':
         if (!event.data.payoutId) throw new Error('payout event without payoutId');
@@ -38,7 +50,7 @@ export class WebhookHandlers {
         });
         return;
       default:
-        return; // unknown event types are stored (audit) and acknowledged, but need no action
+        return; // unknown event types (and dispute inquiries) are stored for audit and acknowledged, but need no action
     }
   }
 }

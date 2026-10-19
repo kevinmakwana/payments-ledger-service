@@ -1,15 +1,19 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { APP_CONFIG, AppConfig } from '../config/config';
 import { DbService } from '../db/db.service';
 import {
   AuthorizeRequest,
   PaymentProvider,
+  ProviderRejectedError,
   ProviderTransaction,
   WebhookEvent,
   WebhookVerificationError,
 } from './provider.interface';
 import { headerValue, signTimestamped, verifyTimestamped } from './signature';
+
+/** 24 hex chars derived from a key: stable ids for a given idempotency key. */
+const stable = (key: string) => createHash('sha256').update(key).digest('hex').slice(0, 24);
 
 /**
  * Offline provider. Behaves like a real one: keeps its own books (separate table from
@@ -42,30 +46,41 @@ export class SimulatedProvider implements PaymentProvider {
     await Promise.all([...this.pending]);
   }
 
-  async authorize(_req: AuthorizeRequest): Promise<{ providerRef: string }> {
-    return { providerRef: `sim_ch_${randomUUID()}` };
+  /**
+   * Results are derived deterministically from the idempotency key (like a real provider replaying a stored
+   * response), and the books/webhook happen once, so re-executing a call is harmless.
+   * A card is declined when the payment method is `pm_card_declined`.
+   */
+  async authorize(req: AuthorizeRequest): Promise<{ providerRef: string }> {
+    if (req.paymentMethod === 'pm_card_declined') throw new ProviderRejectedError('card_declined', 'Your card was declined.');
+    return { providerRef: `sim_ch_${stable(req.idempotencyKey)}` };
   }
 
-  async capture(req: { paymentId: string; providerRef: string; amount: number; currency: string }) {
-    await this.record(req.providerRef, 'charge', req.amount, req.currency);
-    this.emit('payment.captured', { paymentId: req.paymentId, providerRef: req.providerRef, amount: req.amount });
+  async capture(req: { paymentId: string; providerRef: string; amount: number; currency: string; idempotencyKey: string }) {
+    if (await this.record(req.providerRef, 'charge', req.amount, req.currency)) {
+      this.emit('payment.captured', { paymentId: req.paymentId, providerRef: req.providerRef, amount: req.amount });
+    }
     return { reportedRef: req.providerRef };
   }
 
-  async refund(req: { refundId: string; providerRef: string; amount: number; currency: string }) {
-    const refundRef = `sim_re_${randomUUID()}`;
-    await this.record(refundRef, 'refund', req.amount, req.currency, req.providerRef);
-    this.emit('payment.refunded', { providerRef: req.providerRef, refundRef, amount: req.amount });
+  async void(_req: { paymentId: string; providerRef: string; idempotencyKey: string }): Promise<void> {
+    // Nothing to release in the simulator's books: an uncaptured authorization never moved money.
+  }
+
+  async refund(req: { refundId: string; providerRef: string; amount: number; currency: string; idempotencyKey: string }) {
+    const refundRef = `sim_re_${stable(req.idempotencyKey)}`;
+    if (await this.record(refundRef, 'refund', req.amount, req.currency, req.providerRef)) {
+      this.emit('payment.refunded', { providerRef: req.providerRef, refundRef, amount: req.amount });
+    }
     return { refundRef };
   }
 
   async createPayout(req: { payoutId: string; sellerId: string; amount: number; currency: string; attempt: number }) {
-    const payoutRef = `sim_po_${randomUUID()}`;
+    const payoutRef = `sim_po_${stable(`${req.payoutId}:${req.attempt}`)}`;
     const fails = req.sellerId.startsWith('fail_') || (req.sellerId.startsWith('flaky_') && req.attempt === 1);
     if (fails) {
       this.emit('payout.failed', { payoutId: req.payoutId, payoutRef, reason: 'bank_account_rejected' });
-    } else {
-      await this.record(payoutRef, 'payout', req.amount, req.currency);
+    } else if (await this.record(payoutRef, 'payout', req.amount, req.currency)) {
       this.emit('payout.paid', { payoutId: req.payoutId, payoutRef, amount: req.amount });
     }
     return { payoutRef };
@@ -122,11 +137,13 @@ export class SimulatedProvider implements PaymentProvider {
     }
   }
 
-  private async record(id: string, type: ProviderTransaction['type'], amount: number, currency: string, parentRef?: string) {
-    await this.db.query(
-      'INSERT INTO sim_provider_transactions (id, type, amount, currency, parent_ref) VALUES ($1,$2,$3,$4,$5)',
+  /** Inserts into the provider's books once; returns false if this id was already recorded. */
+  private async record(id: string, type: ProviderTransaction['type'], amount: number, currency: string, parentRef?: string): Promise<boolean> {
+    const r = await this.db.query(
+      'INSERT INTO sim_provider_transactions (id, type, amount, currency, parent_ref) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING',
       [id, type, amount, currency, parentRef ?? null],
     );
+    return (r.rowCount ?? 0) > 0;
   }
 
   private emit(type: string, data: WebhookEvent['data']): void {

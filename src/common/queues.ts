@@ -4,3 +4,4 @@ export const PAYOUT_QUEUE = 'payouts';
 export const RECONCILIATION_QUEUE = 'reconciliation';
 export const MONITOR_QUEUE = 'monitor';
 export const MAINTENANCE_QUEUE = 'maintenance';
+export const PAYMENT_RECOVERY_QUEUE = 'payment-recovery';

@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { WEBHOOK_QUEUE } from '../common/queues';
 import { APP_CONFIG, AppConfig } from '../config/config';
+import { decodeCursor, isPgTimestamp, PageQuery, pageOf, resolveLimit, Where } from '../common/pagination';
 import { DbService } from '../db/db.service';
 import { WebhookEvent } from '../providers/provider.interface';
 
@@ -53,12 +54,18 @@ export class WebhooksService {
     );
   }
 
-  async deadLetters() {
-    const r = await this.db.query(
-      `SELECT provider, event_id AS "eventId", type, attempts, last_error AS "lastError", received_at AS "receivedAt"
-         FROM webhook_events WHERE status = 'dead' ORDER BY received_at DESC LIMIT 200`,
+  async deadLetters(q: PageQuery = {}) {
+    const limit = resolveLimit(q.limit);
+    const cursor = decodeCursor<{ t: string; p: string; e: string }>(q.cursor, { t: 'string', p: 'string', e: 'string' }, (c) => isPgTimestamp(c.t));
+    const w = new Where().add('status = ?', 'dead');
+    if (cursor) w.addMany('(received_at, provider, event_id) < (?1::timestamptz, ?2, ?3)', [cursor.t, cursor.p, cursor.e]);
+    const r = await this.db.query<{ provider: string; eventId: string; type: string; attempts: number; lastError: string | null; receivedAt: Date; cursor_ts: string }>(
+      `SELECT provider, event_id AS "eventId", type, attempts, last_error AS "lastError", received_at AS "receivedAt", received_at::text AS cursor_ts
+         FROM webhook_events ${w.sql} ORDER BY received_at DESC, provider DESC, event_id DESC LIMIT ${w.param(limit + 1)}`,
+      w.params,
     );
-    return r.rows;
+    const page = pageOf(r.rows, limit, (row) => ({ t: row.cursor_ts, p: row.provider, e: row.eventId }));
+    return { data: page.data.map(({ cursor_ts: _ts, ...row }) => row), nextCursor: page.nextCursor };
   }
 
   /** Manually re-drive a dead-lettered event (e.g. after fixing the bug that killed it). */

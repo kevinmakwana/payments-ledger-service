@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { MAX_AMOUNT_MINOR } from '../common/money';
+import { PageQuery } from '../common/pagination';
+import { PAYMENT_STATUSES } from './state-machine';
 
 const ID = /^[A-Za-z0-9_.:-]{1,64}$/;
 
@@ -39,3 +41,24 @@ export class RefundDto {
   @IsOptional() @IsInt() @Min(1) @Max(MAX_AMOUNT_MINOR)
   amount?: number;
 }
+
+export class ListPaymentsQuery extends PageQuery {
+  @ApiPropertyOptional() @IsOptional() @IsString() @Matches(ID)
+  sellerId?: string;
+
+  @ApiPropertyOptional() @IsOptional() @IsString() @Matches(ID)
+  buyerId?: string;
+
+  @ApiPropertyOptional({ enum: PAYMENT_STATUSES }) @IsOptional() @IsIn([...PAYMENT_STATUSES])
+  status?: string;
+
+  @ApiPropertyOptional({ enum: ['simulated', 'stripe', 'razorpay'] }) @IsOptional() @IsIn(['simulated', 'stripe', 'razorpay'])
+  provider?: string;
+
+  @ApiPropertyOptional({ description: 'Created at or after this instant (ISO-8601)' }) @IsOptional() @IsDateString()
+  createdFrom?: string;
+
+  @ApiPropertyOptional({ description: 'Created before this instant (ISO-8601)' }) @IsOptional() @IsDateString()
+  createdTo?: string;
+}
+

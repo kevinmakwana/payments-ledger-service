@@ -6,7 +6,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import { MonitorService } from './monitor.service';
 
 /** Runs the monitor checks on a shared Redis-backed schedule (one run per tick, however many instances). */
-@Processor(MONITOR_QUEUE)
+@Processor(MONITOR_QUEUE, { autorun: false })
 export class MonitorProcessor extends WorkerHost implements OnModuleInit {
   constructor(
     private readonly monitor: MonitorService,

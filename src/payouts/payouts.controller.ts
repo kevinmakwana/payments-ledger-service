@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
-import { IsDateString, IsOptional } from 'class-validator';
+import { IsDateString, IsIn, IsOptional, IsString, Matches } from 'class-validator';
+import { PageQuery } from '../common/pagination';
 import { AdminOnly } from '../auth/auth.decorators';
 import { PayoutsService } from './payouts.service';
 
@@ -8,6 +9,17 @@ class RunPayoutsDto {
   @ApiPropertyOptional({ description: 'Evaluate holds as of this instant (default: now). Useful for demos/backfills.' })
   @IsOptional() @IsDateString()
   asOf?: string;
+}
+
+class ListPayoutsQuery extends PageQuery {
+  @ApiPropertyOptional() @IsOptional() @IsString() @Matches(/^[A-Za-z0-9_.:-]{1,64}$/)
+  sellerId?: string;
+
+  @ApiPropertyOptional({ enum: ['pending', 'paid', 'failed'] }) @IsOptional() @IsIn(['pending', 'paid', 'failed'])
+  status?: string;
+
+  @ApiPropertyOptional({ enum: ['simulated', 'stripe', 'razorpay'] }) @IsOptional() @IsIn(['simulated', 'stripe', 'razorpay'])
+  provider?: string;
 }
 
 @ApiTags('payouts')
@@ -25,9 +37,9 @@ export class PayoutsController {
 
   @Get('payouts')
   @AdminOnly()
-  @ApiOperation({ summary: 'List payouts, optionally for one seller' })
-  list(@Query('sellerId') sellerId?: string) {
-    return this.payouts.list(sellerId);
+  @ApiOperation({ summary: 'List payouts, newest first (filters + cursor pagination)' })
+  list(@Query() query: ListPayoutsQuery) {
+    return this.payouts.list(query);
   }
 
   @Get('payouts/:id')

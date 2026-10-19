@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PoolClient } from 'pg';
+import { decodeCursor, isPgTimestamp, isUuid, Page, pageOf, resolveLimit, Where } from '../common/pagination';
 import { DbService, Queryable } from '../db/db.service';
 import { AccountRef, AccountType, naturalBalance } from './accounts';
 import { PostingLine } from './entries';
@@ -128,6 +129,109 @@ export class LedgerService {
       [code],
     );
     return r.rows[0] ? naturalBalance(r.rows[0].type, r.rows[0].total) : 0;
+  }
+
+  /** Journal entries (newest first) with their postings. Keyset-paginated; filter by kind, payment, payout, account or time. */
+  async entries(q: { limit?: number; cursor?: string; kind?: string; paymentId?: string; payoutId?: string; accountCode?: string; from?: string; to?: string }): Promise<Page<Record<string, unknown>>> {
+    const limit = resolveLimit(q.limit);
+    const cursor = decodeCursor<{ t: string; i: string }>(q.cursor, { t: 'string', i: 'string' }, (c) => isPgTimestamp(c.t) && isUuid(c.i));
+    const w = new Where();
+    if (q.kind) w.add('e.kind = ?', q.kind);
+    if (q.paymentId) w.add('e.payment_id = ?::uuid', q.paymentId);
+    if (q.payoutId) w.add('e.payout_id = ?::uuid', q.payoutId);
+    if (q.accountCode) {
+      w.add('EXISTS (SELECT 1 FROM postings px JOIN accounts ax ON ax.id = px.account_id WHERE px.entry_id = e.id AND ax.code = ?)', q.accountCode);
+    }
+    if (q.from) w.add('e.created_at >= ?::timestamptz', q.from);
+    if (q.to) w.add('e.created_at < ?::timestamptz', q.to);
+    if (cursor) w.addMany('(e.created_at, e.id) < (?1::timestamptz, ?2::uuid)', [cursor.t, cursor.i]);
+    const r = await this.db.query<{
+      id: string; kind: string; reference_key: string; external_ref: string | null; payment_id: string | null; payout_id: string | null;
+      description: string | null; created_at: Date; cursor_ts: string; postings: { accountCode: string; currency: string; amount: number }[];
+    }>(
+      `SELECT e.id, e.kind, e.reference_key, e.external_ref, e.payment_id, e.payout_id, e.description, e.created_at, e.created_at::text AS cursor_ts,
+              (SELECT json_agg(json_build_object('accountCode', a.code, 'currency', trim(p.currency), 'amount', p.amount) ORDER BY p.id)
+                 FROM postings p JOIN accounts a ON a.id = p.account_id WHERE p.entry_id = e.id) AS postings
+         FROM journal_entries e ${w.sql} ORDER BY e.created_at DESC, e.id DESC LIMIT ${w.param(limit + 1)}`,
+      w.params,
+    );
+    const page = pageOf(r.rows, limit, (row) => ({ t: row.cursor_ts, i: row.id }));
+    return {
+      data: page.data.map((e) => ({
+        id: e.id,
+        kind: e.kind,
+        referenceKey: e.reference_key,
+        externalRef: e.external_ref,
+        paymentId: e.payment_id,
+        payoutId: e.payout_id,
+        description: e.description,
+        createdAt: e.created_at.toISOString(),
+        postings: e.postings ?? [],
+      })),
+      nextCursor: page.nextCursor,
+    };
+  }
+
+  /**
+   * An account's postings, newest first, each with the running balance right after it (in the account's natural
+   * direction). Read in one snapshot so the starting balance and the rows agree; the cursor carries the running
+   * balance, so the chain stays exact across pages even while new postings arrive.
+   */
+  async statement(code: string, q: { limit?: number; cursor?: string }) {
+    const limit = resolveLimit(q.limit);
+    const cursor = decodeCursor<{ id: number; bal: number }>(q.cursor, { id: 'number', bal: 'number' }, (c) => Number.isSafeInteger(c.id) && Number.isSafeInteger(c.bal));
+    const client = await this.db.pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const acct = (await client.query<{ id: string; code: string; type: AccountType; currency: string; balance: number }>(
+        `SELECT a.id, a.code, a.type, a.currency, b.balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.code = $1`,
+        [code],
+      )).rows[0];
+      if (!acct) throw new NotFoundException(`No account ${code}`);
+      const w = new Where().add('p.account_id = ?::uuid', acct.id);
+      if (cursor) w.add('p.id < ?', cursor.id);
+      const rows = (await client.query<{
+        id: number; amount: number; entry_id: string; kind: string; description: string | null; payment_id: string | null;
+        payout_id: string | null; external_ref: string | null; created_at: Date;
+      }>(
+        `SELECT p.id, p.amount, e.id AS entry_id, e.kind, e.description, e.payment_id, e.payout_id, e.external_ref, e.created_at
+           FROM postings p JOIN journal_entries e ON e.id = p.entry_id ${w.sql} ORDER BY p.id DESC LIMIT ${w.param(limit + 1)}`,
+        w.params,
+      )).rows;
+      await client.query('COMMIT');
+
+      let running = cursor ? cursor.bal : naturalBalance(acct.type, acct.balance);
+      const mapped = rows.map((r) => {
+        const delta = naturalBalance(acct.type, r.amount);
+        const row = {
+          postingId: r.id,
+          entryId: r.entry_id,
+          kind: r.kind,
+          description: r.description,
+          paymentId: r.payment_id,
+          payoutId: r.payout_id,
+          externalRef: r.external_ref,
+          createdAt: r.created_at.toISOString(),
+          side: r.amount > 0 ? ('debit' as const) : ('credit' as const),
+          amount: Math.abs(r.amount),
+          delta,
+          balanceAfter: running,
+        };
+        running -= delta;
+        return row;
+      });
+      const page = pageOf(mapped, limit, (row) => ({ id: row.postingId, bal: row.balanceAfter - row.delta }));
+      return {
+        account: { code: acct.code, type: acct.type, currency: acct.currency.trim(), balance: naturalBalance(acct.type, acct.balance) },
+        data: page.data,
+        nextCursor: page.nextCursor,
+      };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   /** One account with its derived balance and whether the cached balance agrees; undefined if it does not exist. */

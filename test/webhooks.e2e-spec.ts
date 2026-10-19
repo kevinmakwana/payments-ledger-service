@@ -78,7 +78,7 @@ describeE2E('webhooks (e2e, real Postgres + Redis)', () => {
     const dead = await row(e.id);
     expect(dead.attempts).toBe(3); // WEBHOOK_MAX_ATTEMPTS
     expect(dead.last_error).toContain('not captured in our DB yet');
-    const listed = (await t.call('GET', '/webhooks/dead-letters')).body;
+    const listed = (await t.call('GET', '/webhooks/dead-letters')).body.data;
     expect(listed.map((d: { eventId: string }) => d.eventId)).toContain(e.id);
 
     // "Fix" the cause: the payment now exists as captured, then re-drive the dead letter.
