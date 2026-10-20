@@ -1,3 +1,4 @@
+import './instrument'; // must stay first: OpenTelemetry has to patch `pg` before anything loads it
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';

@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { Pool, PoolClient, QueryResult, QueryResultRow, types } from 'pg';
 import { APP_CONFIG, AppConfig } from '../config/config';
+import { withSpan } from '../observability/spans';
 
 // bigint (int8) and numeric (sums) arrive as strings by default. All money here is
 // bounded well below 2^53 (see MAX_AMOUNT_MINOR), so parsing to number is exact.
@@ -35,19 +36,22 @@ export class DbService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Run `fn` in a single transaction (READ COMMITTED; callers take row locks explicitly). */
-  async tx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const result = await fn(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw err;
-    } finally {
-      client.release();
-    }
+  tx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    // One span per transaction groups the individual statement spans (from the pg instrumentation) under it.
+    return withSpan('db.transaction', {}, async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('COMMIT');
+        return result;
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    });
   }
 
   async migrate(): Promise<void> {

@@ -26,6 +26,8 @@ export interface AppConfig {
   /** `json` (one structured line per event, for log pipelines) or `pretty` (Nest's coloured console). Default: json in production. */
   logFormat: 'json' | 'pretty';
   logLevel: 'verbose' | 'debug' | 'info' | 'warn' | 'error';
+  /** OpenTelemetry span export is on (see src/tracing.ts). Queues then carry trace context from producer to worker. */
+  tracingEnabled: boolean;
   /** A provider operation claimed longer ago than this is considered abandoned (crashed process) and can be re-claimed. */
   providerOpLeaseMs: number;
   /** Open operations with at least this many attempts raise a `provider_operation_stuck` alert. */
@@ -81,6 +83,12 @@ export interface AppConfig {
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
 
+/** Tracing is opt-in: it needs an OTLP endpoint (standard OTEL_* variables) and is hard-disabled by OTEL_SDK_DISABLED=true. */
+export function tracingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.OTEL_SDK_DISABLED === 'true') return false;
+  return Boolean(env.OTEL_EXPORTER_OTLP_ENDPOINT || env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
+}
+
 const int = (v: string | undefined, d: number): number => {
   if (v === undefined || v === '') return d;
   const n = Number(v);
@@ -115,6 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     simulatedWebhookBaseUrl: env.SIMULATED_WEBHOOK_BASE_URL || undefined,
     logFormat: env.LOG_FORMAT === 'json' || env.LOG_FORMAT === 'pretty' ? env.LOG_FORMAT : env.NODE_ENV === 'production' ? 'json' : 'pretty',
     logLevel: (['verbose', 'debug', 'info', 'warn', 'error'] as const).find((l) => l === env.LOG_LEVEL) ?? 'info',
+    tracingEnabled: tracingEnabled(env),
     providerOpLeaseMs: int(env.PROVIDER_OP_LEASE_MS, 60_000),
     providerOpMaxAttempts: int(env.PROVIDER_OP_MAX_ATTEMPTS, 10),
     paymentRecoveryAgeMs: int(env.PAYMENT_RECOVERY_AGE_MS, 60_000),
