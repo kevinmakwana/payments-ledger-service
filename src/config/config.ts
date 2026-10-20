@@ -47,6 +47,10 @@ export interface AppConfig {
   /** Requests allowed per client IP per window before answering 429. Counted per instance. */
   rateLimitMax: number;
   rateLimitWindowMs: number;
+  /** `redis` shares the counters across instances (a real global limit); `memory` counts per instance. */
+  rateLimitStore: 'memory' | 'redis';
+  /** Deadline for one rate-limit counter call; past it the request is counted in memory instead of waiting. */
+  rateLimitStoreTimeoutMs: number;
   /** Largest accepted JSON request body (express/body-parser syntax, e.g. "256kb"). */
   bodyLimit: string;
   /** Number of reverse-proxy hops to trust for the client IP (X-Forwarded-For); unset = none. */
@@ -96,6 +100,12 @@ const int = (v: string | undefined, d: number): number => {
   return n;
 };
 
+function rateLimitStore(v: string | undefined): 'memory' | 'redis' {
+  if (v === undefined || v === '') return 'memory';
+  if (v !== 'memory' && v !== 'redis') throw new Error(`RATE_LIMIT_STORE must be memory or redis (got "${v}")`);
+  return v;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const role = env.APP_ROLE ?? 'all';
   if (role !== 'all' && role !== 'api' && role !== 'worker') throw new Error(`APP_ROLE must be all, api or worker (got "${role}")`);
@@ -134,6 +144,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maintenanceCron: env.MAINTENANCE_CRON || '0 4 * * *',
     rateLimitMax: int(env.RATE_LIMIT_MAX, 300),
     rateLimitWindowMs: int(env.RATE_LIMIT_WINDOW_MS, 60_000),
+    rateLimitStore: rateLimitStore(env.RATE_LIMIT_STORE),
+    rateLimitStoreTimeoutMs: int(env.RATE_LIMIT_STORE_TIMEOUT_MS, 250),
     bodyLimit: env.BODY_LIMIT || '256kb',
     trustProxy: env.TRUST_PROXY ? int(env.TRUST_PROXY, 0) : undefined,
     payoutStaleMs: int(env.PAYOUT_STALE_MS, 30 * 60_000),

@@ -58,5 +58,13 @@ describe('loadConfig process role', () => {
   it('rejects an unknown role instead of silently running as something else', () => {
     expect(() => loadConfig({ APP_ROLE: 'bogus' })).toThrow(/APP_ROLE/);
   });
-});
 
+  describe('RATE_LIMIT_STORE', () => {
+    it('defaults to memory, accepts redis, and rejects anything else instead of silently ignoring a typo', () => {
+      expect(loadConfig({}).rateLimitStore).toBe('memory');
+      expect(loadConfig({ RATE_LIMIT_STORE: '' }).rateLimitStore).toBe('memory');
+      expect(loadConfig({ RATE_LIMIT_STORE: 'redis' }).rateLimitStore).toBe('redis');
+      expect(() => loadConfig({ RATE_LIMIT_STORE: 'redsi' })).toThrow(/RATE_LIMIT_STORE/);
+    });
+  });
+});
