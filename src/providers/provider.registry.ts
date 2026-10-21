@@ -30,6 +30,18 @@ export class ProviderRegistry {
     return p;
   }
 
+  /** Providers that can be used right now (the simulator, plus Stripe / Razorpay when their credentials are set). */
+  available(): string[] {
+    return this.names().filter((n) => {
+      try {
+        this.get(n);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   names(): string[] {
     return [...this.providers.keys()];
   }
