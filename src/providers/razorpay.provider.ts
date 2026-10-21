@@ -9,7 +9,7 @@ import {
   WebhookEvent,
   WebhookVerificationError,
 } from './provider.interface';
-import { MAX_LIST_PAGES, providerRequest } from './http';
+import { MAX_LIST_PAGES, minorUnits, providerRequest } from './http';
 import { assertWithinTolerance, headerValue, verifyPlainHmac } from './signature';
 
 /**
@@ -38,8 +38,8 @@ export class RazorpayProvider implements PaymentProvider {
   }
 
   async capture(req: Parameters<PaymentProvider['capture']>[0]) {
-    await this.call('POST', `/payments/${req.providerRef}/capture`, { amount: req.amount, currency: req.currency });
-    return { reportedRef: req.providerRef };
+    const p = await this.call('POST', `/payments/${req.providerRef}/capture`, { amount: req.amount, currency: req.currency });
+    return { reportedRef: req.providerRef, fee: minorUnits(p.fee) };
   }
 
   /** Razorpay has no cancel API: an uncaptured authorization is released automatically, so this is a definitive refusal. */
@@ -74,7 +74,7 @@ export class RazorpayProvider implements PaymentProvider {
     const range = `from=${from}&to=${from + 86399}`;
     const [payments, refunds] = await Promise.all([this.listAll('/payments', range), this.listAll('/refunds', range)]);
     return [
-      ...payments.filter((p) => p.captured).map((p) => ({ id: p.id, type: 'charge' as const, amount: p.amount, currency: p.currency, createdAt: new Date(p.created_at * 1000).toISOString() })),
+      ...payments.filter((p) => p.captured).map((p) => ({ id: p.id, type: 'charge' as const, amount: p.amount, currency: p.currency, createdAt: new Date(p.created_at * 1000).toISOString(), fee: minorUnits(p.fee) })),
       ...refunds.map((r) => ({ id: r.id, type: 'refund' as const, amount: r.amount, currency: r.currency, parentRef: r.payment_id, createdAt: new Date(r.created_at * 1000).toISOString() })),
     ];
   }

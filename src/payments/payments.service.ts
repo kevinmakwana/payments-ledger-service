@@ -7,7 +7,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import { AlertService } from '../alerts/alert.service';
 import { DbService } from '../db/db.service';
 import { IdempotencyService, StoredResponse } from '../idempotency/idempotency.service';
-import { captureLines, refundLines } from '../ledger/entries';
+import { captureLines, providerFeeLines, refundLines } from '../ledger/entries';
 import { LedgerService } from '../ledger/ledger.service';
 import { ProviderRegistry } from '../providers/provider.registry';
 import { decodeCursor, isPgTimestamp, isUuid, Page, pageOf, resolveLimit, Where } from '../common/pagination';
@@ -409,6 +409,17 @@ export class PaymentsService {
           description: `Capture payment ${p.id}`,
           lines: captureLines({ sellerId: p.seller_id, currency, amount: p.amount, fee: p.fee_amount }),
         });
+        const providerFee = outcome.result.fee;
+        if (typeof providerFee === 'number' && Number.isSafeInteger(providerFee) && providerFee > 0 && providerFee <= p.amount) {
+          await this.ledger.post(client, {
+            kind: 'provider_fee',
+            referenceKey: `provider_fee:${p.id}`,
+            externalRef: String(outcome.result.reportedRef),
+            paymentId: p.id,
+            description: `Provider fee for payment ${p.id}`,
+            lines: providerFeeLines({ currency, amount: providerFee }),
+          });
+        }
         await this.setPayment(client, p, { status: 'captured' });
         return;
       }

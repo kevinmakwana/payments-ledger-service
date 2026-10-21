@@ -1,10 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { DbService } from '../db/db.service';
+import { ProviderFeesService } from '../ledger/provider-fees.service';
 import { ProviderTransaction } from '../providers/provider.interface';
 import { ProviderRegistry } from '../providers/provider.registry';
 import { ReconciliationItemsService } from './reconciliation-items.service';
 
-export type MismatchType = 'missing_in_ledger' | 'missing_at_provider' | 'amount_mismatch';
+export type MismatchType = 'missing_in_ledger' | 'missing_at_provider' | 'amount_mismatch' | 'fee_mismatch';
 
 export interface Mismatch {
   type: MismatchType;
@@ -40,6 +41,8 @@ export interface ReconciliationReport {
     new: number;
     /** Items from earlier runs that this run found matched (e.g. a late webhook caught the ledger up) and closed. */
     autoResolved: number;
+    /** Provider fees this run found missing from the ledger and booked (e.g. Stripe computes them after the capture). */
+    feesBooked: number;
   };
   mismatches: Mismatch[];
 }
@@ -52,6 +55,10 @@ interface LedgerSide {
   currency: string;
   /** UTC day the entry was recorded. */
   day?: string;
+  /** The payment behind a charge entry. */
+  paymentId?: string;
+  /** Provider fee booked in the ledger for that payment (0 when none). */
+  fee?: number;
 }
 
 const KIND_MAP: Record<string, ProviderTransaction['type']> = {
@@ -83,6 +90,12 @@ export function compare(providerTxs: ProviderTransaction[], ledger: LedgerSide[]
       mismatches.push({
         type: 'amount_mismatch', kind: t.type, ref: t.id, currency: t.currency,
         providerAmount: t.amount, ledgerAmount: l.amount, entryId: l.entryId, day,
+      });
+    } else if (t.type === 'charge' && t.fee !== undefined && (l.fee ?? 0) !== t.fee) {
+      // Only checked when the provider reports a fee, and only once the amounts agree (one finding per transaction).
+      mismatches.push({
+        type: 'fee_mismatch', kind: t.type, ref: t.id, currency: t.currency,
+        providerAmount: t.fee, ledgerAmount: l.fee ?? 0, entryId: l.entryId, day,
       });
     } else {
       matched++;
@@ -124,6 +137,7 @@ export class ReconciliationService {
     private readonly db: DbService,
     private readonly providers: ProviderRegistry,
     private readonly items: ReconciliationItemsService,
+    private readonly fees: ProviderFeesService,
   ) {}
 
   /**
@@ -147,6 +161,7 @@ export class ReconciliationService {
       )
     ).flat();
     const ledger = await this.ledgerSide(days[0], days[days.length - 1], provider.name);
+    const feesBooked = await this.bookMissingFees(providerTxs, ledger);
     const day = compareForDay(date, providerTxs, ledger);
     const synced = await this.items.sync(provider.name, date, day.mismatches);
     const report: ReconciliationReport = {
@@ -161,6 +176,7 @@ export class ReconciliationService {
         open: synced.mismatches.filter((m) => m.status === 'open').length,
         new: synced.mismatches.filter((m) => m.isNew).length,
         autoResolved: synced.autoResolved,
+        feesBooked,
       },
       mismatches: synced.mismatches,
     };
@@ -172,10 +188,29 @@ export class ReconciliationService {
     return report;
   }
 
+  /**
+   * A fee the provider reports for a charge we captured without knowing it is booked now: that is the normal path
+   * for providers that compute fees asynchronously, so it is not a discrepancy. Only an amount that agrees is
+   * touched, and a fee already on the books is never changed here (a differing fee is a `fee_mismatch` for a person).
+   */
+  private async bookMissingFees(providerTxs: ProviderTransaction[], ledger: LedgerSide[]): Promise<number> {
+    const byRef = new Map(ledger.filter((l) => l.kind === 'charge' && l.paymentId).map((l) => [l.ref, l]));
+    let booked = 0;
+    for (const t of providerTxs) {
+      const l = byRef.get(t.id);
+      if (t.type !== 'charge' || !t.fee || t.fee > t.amount || !l || (l.fee ?? 0) !== 0) continue;
+      if (l.amount !== t.amount || l.currency !== t.currency) continue;
+      await this.fees.setFee(l.paymentId!, t.fee, l.currency, t.id);
+      l.fee = t.fee;
+      booked++;
+    }
+    return booked;
+  }
+
   /** Cash-moving ledger entries recorded in [from, to] (UTC days), with the amount that hit the provider clearing account. */
   private async ledgerSide(from: string, to: string, provider: string): Promise<LedgerSide[]> {
-    const r = await this.db.query<{ id: string; kind: string; external_ref: string; amount: number; currency: string; day: string }>(
-      `SELECT e.id, e.kind, e.external_ref, a.currency, sum(abs(p.amount)) AS amount,
+    const r = await this.db.query<{ id: string; kind: string; external_ref: string; amount: number; currency: string; day: string; payment_id: string | null }>(
+      `SELECT e.id, e.kind, e.external_ref, e.payment_id, a.currency, sum(abs(p.amount)) AS amount,
               ((e.created_at AT TIME ZONE 'UTC')::date)::text AS day
          FROM journal_entries e
          JOIN postings p ON p.entry_id = e.id
@@ -186,9 +221,22 @@ export class ReconciliationService {
           AND e.external_ref IS NOT NULL
           AND (e.created_at AT TIME ZONE 'UTC')::date BETWEEN $1::date AND $2::date
           AND COALESCE(pa.provider, po.provider) = $3
-        GROUP BY e.id, e.kind, e.external_ref, a.currency, e.created_at`,
+        GROUP BY e.id, e.kind, e.external_ref, e.payment_id, a.currency, e.created_at`,
       [from, to, provider],
     );
+    const paymentIds = [...new Set(r.rows.map((row) => row.payment_id).filter((id): id is string => id !== null))];
+    const feeRows = paymentIds.length
+      ? await this.db.query<{ payment_id: string; fee: number }>(
+          `SELECT e.payment_id, sum(p.amount)::bigint AS fee
+             FROM journal_entries e
+             JOIN postings p ON p.entry_id = e.id
+             JOIN accounts a ON a.id = p.account_id AND a.code LIKE 'platform:provider_fees:%'
+            WHERE e.kind IN ('provider_fee', 'provider_fee_adjustment') AND e.payment_id = ANY($1::uuid[])
+            GROUP BY e.payment_id`,
+          [paymentIds],
+        )
+      : { rows: [] as { payment_id: string; fee: number }[] };
+    const feeByPayment = new Map(feeRows.rows.map((f) => [f.payment_id, f.fee]));
     return r.rows.map((row) => ({
       entryId: row.id,
       kind: KIND_MAP[row.kind],
@@ -196,6 +244,8 @@ export class ReconciliationService {
       amount: row.amount,
       currency: row.currency.trim(),
       day: row.day,
+      paymentId: row.payment_id ?? undefined,
+      fee: row.kind === 'capture' ? (feeByPayment.get(row.payment_id ?? '') ?? 0) : undefined,
     }));
   }
 }

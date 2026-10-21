@@ -14,8 +14,8 @@ class ListItemsQuery extends PageQuery {
   @ApiPropertyOptional({ enum: ['simulated', 'stripe', 'razorpay'] }) @IsOptional() @IsIn(['simulated', 'stripe', 'razorpay'])
   provider?: string;
 
-  @ApiPropertyOptional({ enum: ['missing_in_ledger', 'missing_at_provider', 'amount_mismatch'] })
-  @IsOptional() @IsIn(['missing_in_ledger', 'missing_at_provider', 'amount_mismatch'])
+  @ApiPropertyOptional({ enum: ['missing_in_ledger', 'missing_at_provider', 'amount_mismatch', 'fee_mismatch'] })
+  @IsOptional() @IsIn(['missing_in_ledger', 'missing_at_provider', 'amount_mismatch', 'fee_mismatch'])
   type?: string;
 
   @ApiPropertyOptional({ example: '2026-03-10', description: 'UTC day the discrepancy belongs to' })
@@ -66,6 +66,13 @@ export class ReconciliationController {
   @ApiOperation({ summary: 'Accept a discrepancy as known and expected (a note is required). It stays ignored while it is unchanged.' })
   ignore(@Param('id', ParseUUIDPipe) id: string, @Body() dto: IgnoreItemDto, @CurrentPrincipal() by?: Principal) {
     return this.items.ignore(id, dto.note, actor(by));
+  }
+
+  @Post('reconciliation/items/:id/book-fee')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Fix a fee_mismatch by booking the provider\'s fee (the difference is posted as an adjustment entry)' })
+  bookFee(@Param('id', ParseUUIDPipe) id: string, @CurrentPrincipal() by?: Principal) {
+    return this.items.bookFee(id, actor(by));
   }
 
   @Post('reconciliation/items/:id/reopen')

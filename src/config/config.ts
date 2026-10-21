@@ -71,6 +71,9 @@ export interface AppConfig {
   webhookMaxAttempts: number;
   webhookBackoffMs: number;
   simulatedWebhookSecret: string;
+  /** Processing fee the simulated provider charges per capture: basis points of the amount plus a fixed part (minor units). Default none. */
+  simulatedFeeBps: number;
+  simulatedFeeFixedMinor: number;
   /** Upper bound for one provider HTTP call (request + response body). */
   providerTimeoutMs: number;
   /** Per-dependency deadline for /health/ready. */
@@ -164,6 +167,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     webhookMaxAttempts: int(env.WEBHOOK_MAX_ATTEMPTS, 5),
     webhookBackoffMs: int(env.WEBHOOK_BACKOFF_MS, 1000),
     simulatedWebhookSecret: env.SIMULATED_WEBHOOK_SECRET ?? 'whsec_simulated_dev',
+    simulatedFeeBps: int(env.SIMULATED_FEE_BPS, 0),
+    simulatedFeeFixedMinor: int(env.SIMULATED_FEE_FIXED_MINOR, 0),
     providerTimeoutMs: int(env.PROVIDER_TIMEOUT_MS, 15_000),
     healthCheckTimeoutMs: int(env.HEALTH_CHECK_TIMEOUT_MS, 2000),
     alertWebhookUrl: env.ALERT_WEBHOOK_URL || undefined,

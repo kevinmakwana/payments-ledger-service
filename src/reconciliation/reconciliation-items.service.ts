@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { decodeCursor, isPgTimestamp, isUuid, Page, pageOf, resolveLimit, Where } from '../common/pagination';
 import { DbService } from '../db/db.service';
+import { ProviderFeesService } from '../ledger/provider-fees.service';
 import type { Mismatch } from './reconciliation.service';
 
 export type ItemStatus = 'open' | 'resolved' | 'ignored';
@@ -63,7 +64,10 @@ const SELECT = `SELECT *, date::text AS date, first_seen_at::text AS cursor_ts F
 export class ReconciliationItemsService {
   private readonly logger = new Logger(ReconciliationItemsService.name);
 
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly fees: ProviderFeesService,
+  ) {}
 
   /**
    * Records the discrepancies found for one provider and day and closes items for that day that are no longer
@@ -173,6 +177,31 @@ export class ReconciliationItemsService {
     });
     this.logger.warn({ msg: 'reconciliation_item_reopened', itemId: id, by });
     return toItemView(row);
+  }
+
+  /**
+   * Resolves a `fee_mismatch` by making the ledger's booked fee equal the provider's (posting the difference as an
+   * adjustment entry). Use it when the provider's figure is the truth, which for a processing fee it is.
+   */
+  async bookFee(id: string, by: string): Promise<ItemView> {
+    const item = await this.db.query<ItemRow & { payment_id: string | null }>(
+      `SELECT i.*, i.date::text AS date, e.payment_id FROM reconciliation_items i LEFT JOIN journal_entries e ON e.id = i.entry_id WHERE i.id = $1`,
+      [id],
+    );
+    const cur = item.rows[0];
+    if (!cur) throw new NotFoundException({ code: 'not_found', message: 'Reconciliation item not found' });
+    if (cur.status === 'resolved') throw new ConflictException({ code: 'item_resolved', message: 'This item is already resolved' });
+    if (cur.type !== 'fee_mismatch' || cur.provider_amount === null || !cur.payment_id) {
+      throw new ConflictException({ code: 'not_a_fee_mismatch', message: 'Only fee mismatches can be fixed by booking the provider fee' });
+    }
+    await this.fees.setFee(cur.payment_id, cur.provider_amount, cur.currency.trim(), cur.ref);
+    const u = await this.db.query<ItemRow>(
+      `UPDATE reconciliation_items SET status = 'resolved', resolution = 'fee_booked', resolved_at = now(), resolved_by = $2
+        WHERE id = $1 AND status <> 'resolved' RETURNING *, date::text AS date`,
+      [id, by],
+    );
+    this.logger.warn({ msg: 'reconciliation_fee_booked', itemId: id, by, fee: cur.provider_amount });
+    return toItemView(u.rows[0] ?? cur);
   }
 
   /** Open items that have waited at least `days` days, oldest first. */

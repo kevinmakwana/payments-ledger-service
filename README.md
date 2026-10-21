@@ -115,9 +115,11 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 | GET | `/disputes` | List disputes (chargebacks). Filters: `status`, `paymentId`, `provider`. |
 | GET | `/sellers/:sellerId/balance` | Ledger balance and the amount available for payout. |
 | GET | `/reports/reconciliation?date=YYYY-MM-DD` | Reconcile a UTC day now: provider vs ledger mismatch report; every discrepancy is tracked as an item, and items that now match are closed. |
+| GET | `/reports/margin` | Platform fee revenue, provider processing fees and net margin per currency for a range of UTC days (`from`, `to`). |
 | GET | `/reports/reconciliation/items` | Tracked discrepancies, newest first. Filters: `status` (`open`, `ignored`, `resolved`), `provider`, `type`, `date`. |
 | GET | `/reports/reconciliation/items/:id` | One discrepancy. |
 | POST | `/reports/reconciliation/items/:id/ignore` | Accept a discrepancy as known (`{ "note": "why" }` required, 3-500 chars). |
+| POST | `/reports/reconciliation/items/:id/book-fee` | Fix a `fee_mismatch` by booking the provider's fee (the difference is posted as an adjustment). |
 | POST | `/reports/reconciliation/items/:id/reopen` | Put an ignored discrepancy back in the open queue. |
 | GET | `/ledger/trial-balance` | All balances plus proof that postings sum to zero. |
 | GET | `/ledger/accounts/:code` | One account's balance (cached and derived). |
@@ -166,6 +168,13 @@ Every list endpoint returns `{ "data": [...], "nextCursor": "..." | null }` and 
 - **Negative balances:** a refund or lost dispute after payout can leave a seller owing the platform. `GET /sellers/:id/balance` reports `owesPlatform`; nothing is payable until new sales cover the debt, and payouts net it automatically (new sales minus what is owed, minus the reserve). The monitor raises a `seller_negative_balance` warning so a human can decide whether to collect sooner.
 - `payment.failed` (Stripe `payment_intent.payment_failed`, Razorpay `payment.failed`) marks a not-yet-captured payment `failed`. For money that was already captured it raises a critical `payment_failed_after_capture` alert and changes nothing, because money may already have moved. Not modelled yet: provider dispute fees, and Razorpay `payment.dispute.closed` / `under_review` (stored, not acted on). The Razorpay dispute payloads follow Razorpay's published docs; the `lost` sample could not be confirmed, and like the other live drivers they have not been exercised against the real API.
 
+**Provider fees**
+
+- What Stripe, Razorpay or the simulator charge to process a payment is booked as an expense: `Dr platform:provider_fees / Cr platform:clearing` (kind `provider_fee`), because the provider deducts it from the balance it holds for us. The seller's share is fixed at capture and is never touched; the platform's fee revenue is what bears the cost. Providers keep their fee on a refund, so refunds do not reverse it.
+- The fee is booked in the capture's own transaction when the provider already knows it (Razorpay's capture response `fee`, which includes GST; Stripe's expanded `latest_charge.balance_transaction`; `SIMULATED_FEE_BPS` + `SIMULATED_FEE_FIXED_MINOR` for the simulator, default none). Stripe creates the balance transaction asynchronously, so it is often not there yet: reconciliation then books it from the provider's own listing, once and without raising anything. A fee that is absent, malformed or in another currency than the payment is never guessed.
+- Reconciliation also compares the booked fee with the provider's, and a difference is a `fee_mismatch` item (only once the charge amounts agree). `POST /reports/reconciliation/items/:id/book-fee` makes the ledger equal the provider's figure by posting the difference as a `provider_fee_adjustment` entry (every correction is its own entry, so any number of them is safe); or ignore it with a note.
+- `GET /reports/margin?from=&to=` (admin) shows, per currency, platform fee revenue (net of fee returned on refunds and lost disputes), provider fees, and the net margin.
+
 **Payouts and reconciliation**
 - Payable = credits older than the hold period − all debits − reserve, floored at zero. Concurrent batches serialize on the seller's balance row.
 - **Payouts go back out through the provider that took the money.** The seller-level total (and its single reserve) is unchanged, but it is split into one payout per provider, largest first, and a provider is never asked to pay out more than it took in for that seller (a refund counts against the provider of its payment, a payout against the provider that carried it). A leg below `PAYOUT_MIN_MINOR` is skipped and left for a later run. Note for existing databases: payouts created before this change were all attributed to the default provider, so on a database that already paid out money taken by another provider, the first run could pay that money out again; start from a clean ledger or reconcile first.
@@ -173,7 +182,7 @@ Every list endpoint returns `{ "data": [...], "nextCursor": "..." | null }` and 
 - Reconciliation matches provider transactions to ledger entries by provider reference and reports `missing_in_ledger`, `missing_at_provider` and `amount_mismatch`. A day is matched against the day before and after as well, so a transaction near midnight that the provider dated on one side and we recorded on the other matches instead of showing up as two false mismatches; a finding is only reported on the day it belongs to.
 - **Discrepancies are tracked until someone deals with them.** Each one is an item with a lifecycle: `open` → `ignored` (an operator accepted it, with a required note, recorded with their key id) or `resolved`. A later run that finds the transaction matched resolves the item by itself (`auto_matched`), which is how a late webhook closes the discrepancy it caused; a resolved item that comes back reopens as new. An ignored item stays ignored only while the discrepancy is unchanged: if the type or amounts change it reopens. The nightly job (03:00 UTC) reconciles the last `RECONCILIATION_LOOKBACK_DAYS` days (default 3) for every available provider, alerts once per *new* discrepancy (`reconciliation_mismatch`, not again on the following nights), and alerts every night about items open for `RECONCILIATION_STALE_DAYS`+ days (`reconciliation_item_stale`). One provider being unreachable does not stop the others from being reconciled; the job still fails so the error is visible.
 
-**Known simplifications** (deliberate, see Next steps): a refund can drive a seller balance negative after payout; a single provider fee model.
+**Known simplifications** (deliberate, see Next steps): a refund can drive a seller balance negative after payout.
 
 ## Authentication
 
@@ -282,17 +291,18 @@ DATABASE_URL=postgres://ledger:ledger@localhost:5442/ledger REDIS_URL=redis://lo
 | `stripe` | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Connect: PaymentIntents with manual capture, Refunds, Transfers to `acct_…` sellers. |
 | `razorpay` | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_X_ACCOUNT_NUMBER` (payouts) | Verifies Checkout payments, captures, refunds, RazorpayX payouts (with the mandatory `X-Payout-Idempotency` header, derived per payout attempt). |
 
-The Stripe and Razorpay drivers implement the same `PaymentProvider` interface and their signature/normalisation paths are unit-tested, but they have **not been exercised against the live APIs** (no keys in CI).
+The Stripe and Razorpay drivers implement the same `PaymentProvider` interface and their signature/normalisation paths are unit-tested, but they have **not been exercised against the live APIs** (no keys in CI). That includes the fee fields: they are read as the Stripe and Razorpay documentation describes them (verified against the docs, not against live responses).
 
 ## Configuration
 
 All via environment variables, see [.env.example](.env.example): fee (`PLATFORM_FEE_BPS`), `PAYOUT_HOLD_DAYS`, `PAYOUT_RESERVE_MINOR`, `PAYOUT_MIN_MINOR`, `PAYOUT_MAX_ATTEMPTS`, webhook tolerance / attempts / backoff, and `SCHEDULERS_ENABLED`.
 
-Auth: `API_KEYS`, `API_KEY_CACHE_TTL_MS`, `ALLOW_UNAUTHENTICATED`. Process: `APP_ROLE`, `WORKER_PORT`, `SIMULATED_WEBHOOK_BASE_URL`. Logging: `LOG_FORMAT`, `LOG_LEVEL`. Edge: `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_STORE`, `RATE_LIMIT_STORE_TIMEOUT_MS`, `BODY_LIMIT`, `TRUST_PROXY`. Tracing: `OTEL_EXPORTER_OTLP_ENDPOINT` and the other standard `OTEL_*` variables. Outbox: `PROVIDER_OP_LEASE_MS`, `PROVIDER_OP_MAX_ATTEMPTS`, `PAYMENT_RECOVERY_AGE_MS`, `PAYMENT_RECOVERY_CRON`, `AUTHORIZATION_TTL_HOURS`. Retention: `IDEMPOTENCY_KEY_TTL_HOURS`, `WEBHOOK_RETENTION_DAYS`, `MAINTENANCE_CRON`. Reconciliation: `RECONCILIATION_LOOKBACK_DAYS`, `RECONCILIATION_STALE_DAYS`. Payout sweeper: `PAYOUT_STALE_MS`, `PAYOUT_AWAITING_PROVIDER_MS`, `PAYOUT_SWEEP_CRON`. Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
+Auth: `API_KEYS`, `API_KEY_CACHE_TTL_MS`, `ALLOW_UNAUTHENTICATED`. Process: `APP_ROLE`, `WORKER_PORT`, `SIMULATED_WEBHOOK_BASE_URL`. Logging: `LOG_FORMAT`, `LOG_LEVEL`. Edge: `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_STORE`, `RATE_LIMIT_STORE_TIMEOUT_MS`, `BODY_LIMIT`, `TRUST_PROXY`. Tracing: `OTEL_EXPORTER_OTLP_ENDPOINT` and the other standard `OTEL_*` variables. Outbox: `PROVIDER_OP_LEASE_MS`, `PROVIDER_OP_MAX_ATTEMPTS`, `PAYMENT_RECOVERY_AGE_MS`, `PAYMENT_RECOVERY_CRON`, `AUTHORIZATION_TTL_HOURS`. Retention: `IDEMPOTENCY_KEY_TTL_HOURS`, `WEBHOOK_RETENTION_DAYS`, `MAINTENANCE_CRON`. Reconciliation: `RECONCILIATION_LOOKBACK_DAYS`, `RECONCILIATION_STALE_DAYS`. Simulator fees: `SIMULATED_FEE_BPS`, `SIMULATED_FEE_FIXED_MINOR`. Payout sweeper: `PAYOUT_STALE_MS`, `PAYOUT_AWAITING_PROVIDER_MS`, `PAYOUT_SWEEP_CRON`. Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
 
 ## Next steps
 
-- Multi-currency payouts and FX postings; per-seller reserve policies
+- Multi-currency payouts and FX postings (a Stripe fee in a settlement currency other than the payment's is deliberately ignored today); per-seller reserve policies
+- Provider fees on refunds, disputes and payouts (only the processing fee on a charge is booked)
 - Per-tenant API keys scoped to a seller or client (keys today carry a role, not a tenant)
 
 ## License

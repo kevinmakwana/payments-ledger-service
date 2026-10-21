@@ -6,13 +6,13 @@ CREATE TABLE reconciliation_items (
   kind            text NOT NULL CHECK (kind IN ('charge', 'refund', 'payout')),
   ref             text NOT NULL,                 -- the provider's id for the transaction
   date            date NOT NULL,                 -- the UTC day the discrepancy belongs to
-  type            text NOT NULL CHECK (type IN ('missing_in_ledger', 'missing_at_provider', 'amount_mismatch')),
+  type            text NOT NULL CHECK (type IN ('missing_in_ledger', 'missing_at_provider', 'amount_mismatch', 'fee_mismatch')),
   currency        char(3) NOT NULL,
   provider_amount bigint,
   ledger_amount   bigint,
   entry_id        uuid,
   status          text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'ignored')),
-  resolution      text CHECK (resolution IN ('auto_matched', 'ignored')),
+  resolution      text CHECK (resolution IN ('auto_matched', 'ignored', 'fee_booked')),
   note            text,
   resolved_by     text,
   first_seen_at   timestamptz NOT NULL DEFAULT now(),

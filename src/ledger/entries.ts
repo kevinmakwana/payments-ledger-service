@@ -1,4 +1,4 @@
-import { AccountRef, clearing, disputedFunds, disputeHolds, fees, payoutsInTransit, sellerPayable } from './accounts';
+import { AccountRef, clearing, disputedFunds, disputeHolds, fees, payoutsInTransit, providerFees, sellerPayable } from './accounts';
 
 /** One side of a journal entry. amount > 0 is a debit, amount < 0 is a credit. */
 export interface PostingLine {
@@ -18,6 +18,22 @@ export function captureLines(p: { sellerId: string; currency: string; amount: nu
     credit(sellerPayable(p.sellerId, p.currency), p.amount - p.fee),
     credit(fees(p.currency), p.fee),
   ]);
+}
+
+/**
+ * The provider's processing fee for a charge. The provider deducts it from the balance it holds for us, so the
+ * platform's clearing balance drops and the platform books an expense. The seller is unaffected: their share was
+ * fixed at capture, and the platform's fee revenue is what bears this cost.
+ */
+export function providerFeeLines(p: { currency: string; amount: number }): PostingLine[] {
+  return [debit(providerFees(p.currency), p.amount), credit(clearing(p.currency), p.amount)];
+}
+
+/** Moves the booked provider fee by `delta` (positive: the provider charged more than booked; negative: less). */
+export function providerFeeAdjustmentLines(p: { currency: string; delta: number }): PostingLine[] {
+  return p.delta > 0
+    ? providerFeeLines({ currency: p.currency, amount: p.delta })
+    : [credit(providerFees(p.currency), -p.delta), debit(clearing(p.currency), -p.delta)];
 }
 
 /** Money goes back to the buyer; the fee is returned pro rata, the seller bears the rest. */

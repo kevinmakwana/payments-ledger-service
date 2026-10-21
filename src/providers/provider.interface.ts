@@ -40,6 +40,8 @@ export interface ProviderTransaction {
   currency: string;
   parentRef?: string;
   createdAt: string; // ISO-8601
+  /** Processing fee the provider charged for a charge, in minor units, when it reports one. */
+  fee?: number;
 }
 
 export interface AuthorizeRequest {
@@ -54,8 +56,12 @@ export interface AuthorizeRequest {
 export interface PaymentProvider {
   readonly name: string;
   authorize(req: AuthorizeRequest): Promise<{ providerRef: string }>;
-  /** `reportedRef` is the id this provider uses for the captured charge in its transaction reports. */
-  capture(req: { paymentId: string; providerRef: string; amount: number; currency: string; idempotencyKey: string }): Promise<{ reportedRef: string }>;
+  /**
+   * `reportedRef` is the id this provider uses for the captured charge in its transaction reports. `fee` is the
+   * provider's processing fee in minor units of the payment's currency, only when the provider already knows it
+   * (some compute it asynchronously; reconciliation books those later).
+   */
+  capture(req: { paymentId: string; providerRef: string; amount: number; currency: string; idempotencyKey: string }): Promise<{ reportedRef: string; fee?: number }>;
   refund(req: { refundId: string; providerRef: string; amount: number; currency: string; idempotencyKey: string }): Promise<{ refundRef: string }>;
   /** Cancel an authorization that will not be captured. Throws ProviderRejectedError if the provider cannot. */
   void(req: { paymentId: string; providerRef: string; idempotencyKey: string }): Promise<void>;

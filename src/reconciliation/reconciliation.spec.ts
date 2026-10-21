@@ -68,3 +68,27 @@ describe('compareForDay (±1 day window)', () => {
     expect(r.matched).toBe(0);
   });
 });
+
+describe('fee comparison', () => {
+  const charge = (id: string, amount: number, fee?: number) => ({ id, type: 'charge' as const, amount, currency: 'USD', createdAt: '2026-03-10T10:00:00Z', fee });
+  const entry = (ref: string, amount: number, fee?: number) => ({ entryId: `e_${ref}`, kind: 'charge' as const, ref, amount, currency: 'USD', fee });
+
+  it('matches when the provider fee equals the booked fee, and treats "no fee booked" as 0', () => {
+    expect(compare([charge('a', 100, 5)], [entry('a', 100, 5)]).mismatches).toEqual([]);
+    expect(compare([charge('a', 100, 0)], [entry('a', 100)]).mismatches).toEqual([]);
+  });
+
+  it('flags a different fee, with the provider figure first', () => {
+    expect(compare([charge('a', 100, 7)], [entry('a', 100, 5)]).mismatches).toMatchObject([
+      { type: 'fee_mismatch', ref: 'a', providerAmount: 7, ledgerAmount: 5 },
+    ]);
+  });
+
+  it('ignores fees entirely when the provider does not report one', () => {
+    expect(compare([charge('a', 100, undefined)], [entry('a', 100, 5)]).mismatches).toEqual([]);
+  });
+
+  it('reports one finding per transaction: an amount mismatch takes precedence over a fee mismatch', () => {
+    expect(compare([charge('a', 100, 7)], [entry('a', 99, 5)]).mismatches.map((m) => m.type)).toEqual(['amount_mismatch']);
+  });
+});

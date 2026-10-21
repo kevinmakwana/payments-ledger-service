@@ -36,4 +36,4 @@
 ## Phase 5: Money correctness
 - [x] **T25** Persisted reconciliation items with a lifecycle (open / resolved / ignored): mismatches are auto-resolved when a later run finds them matched, a lookback window re-checks recent days, and a ±1 day window stops UTC day-boundary false positives
 - [x] **T26** Operator workflow for mismatches: list / get / ignore (with a required note) / reopen, alerts only on new items plus a stale-item alert, open-item metrics, and nightly reconciliation of every configured provider
-- [ ] **T27** Provider fee accounting: record the fee Stripe / Razorpay / the simulator charge on each capture as a ledger expense, and a margin report (platform fee revenue minus provider fees)
+- [x] **T27** Provider fee accounting: record the fee Stripe / Razorpay / the simulator charge on each capture as a ledger expense, and a margin report (platform fee revenue minus provider fees)
