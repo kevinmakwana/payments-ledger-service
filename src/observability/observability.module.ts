@@ -13,6 +13,7 @@ import {
 import { AllExceptionsFilter } from './all-exceptions.filter';
 import { MetricsController } from './metrics.controller';
 import { MetricsService } from './metrics.service';
+import { TracingLifecycle } from './tracing.lifecycle';
 
 @Global()
 @Module({
@@ -28,7 +29,7 @@ import { MetricsService } from './metrics.service';
     ),
   ],
   controllers: [MetricsController],
-  providers: [MetricsService, { provide: APP_FILTER, useClass: AllExceptionsFilter }],
+  providers: [MetricsService, TracingLifecycle, { provide: APP_FILTER, useClass: AllExceptionsFilter }],
   exports: [MetricsService],
 })
 export class ObservabilityModule {}

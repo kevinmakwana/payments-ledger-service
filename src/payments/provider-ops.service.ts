@@ -4,6 +4,7 @@ import { APP_CONFIG, AppConfig } from '../config/config';
 import { DbService } from '../db/db.service';
 import { MetricsService } from '../observability/metrics.service';
 import { ProviderRejectedError } from '../providers/provider.interface';
+import { withSpan } from '../observability/spans';
 import { ProviderRegistry } from '../providers/provider.registry';
 
 export type OpKind = 'authorize' | 'capture' | 'refund' | 'void';
@@ -117,7 +118,8 @@ export class ProviderOpsService {
       const labels = { provider: claimed.provider, operation: claimed.kind };
       const stopTimer = this.metrics.providerDuration.startTimer(labels);
       try {
-        outcome = { ok: true, result: await this.callProvider(claimed) };
+        const attributes = { 'app.provider': claimed.provider, 'app.operation': claimed.kind, 'app.payment_id': claimed.payment_id, 'app.attempt': claimed.attempts };
+        outcome = { ok: true, result: await withSpan(`provider_operation ${claimed.kind}`, { attributes }, () => this.callProvider(claimed)) };
         this.metrics.providerCalls.inc({ ...labels, outcome: 'success' });
       } catch (err) {
         if (!(err instanceof ProviderRejectedError)) {

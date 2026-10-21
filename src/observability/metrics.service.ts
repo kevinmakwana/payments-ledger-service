@@ -54,6 +54,11 @@ export class MetricsService {
     labelNames: ['kind', 'severity'],
     registers: [this.registry],
   });
+  readonly rateLimitFallbacks = new Counter({
+    name: 'rate_limit_store_fallbacks_total',
+    help: 'Requests counted in memory because the Redis rate-limit store was unavailable (limits are per instance meanwhile)',
+    registers: [this.registry],
+  });
   /** 1 when cached balances agree with postings and every currency sums to zero, as of the last monitor run. */
   readonly ledgerConsistent = new Gauge({
     name: 'ledger_consistent',

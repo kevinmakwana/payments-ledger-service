@@ -1,5 +1,6 @@
 import { ProviderTimeoutError } from '../common/errors';
 import { traceHeaders } from '../observability/request-context';
+import { SpanKind, withSpan } from '../observability/spans';
 
 /** Hard stop for paginated listings, so a misbehaving API can never loop forever (or silently truncate). */
 export const MAX_LIST_PAGES = 500;
@@ -21,6 +22,20 @@ export async function providerRequest(
   init: RequestInit,
   timeoutMs: number,
 ): Promise<ProviderResponse> {
+  const { pathname } = new URL(url); // path only: the query string and body can hold ids and card data
+  const method = init.method ?? 'GET';
+  return withSpan(
+    `${provider} ${method} ${pathname}`,
+    { kind: SpanKind.CLIENT, attributes: { 'app.provider': provider, 'http.request.method': method, 'url.path': pathname } },
+    async (span) => {
+      const res = await send(provider, url, init, timeoutMs);
+      span.setAttribute('http.response.status_code', res.status);
+      return res;
+    },
+  );
+}
+
+async function send(provider: string, url: string, init: RequestInit, timeoutMs: number): Promise<ProviderResponse> {
   try {
     // Continue the caller's W3C trace (if any) so a provider-side log line can be tied back to our request.
     const headers = { ...(init.headers as Record<string, string> | undefined), ...traceHeaders() };

@@ -1,6 +1,7 @@
 import type { INestApplicationContext } from '@nestjs/common';
 import { createServer, type Server, type ServerResponse } from 'http';
-import { authenticate, extractToken } from './auth/api-keys';
+import { ApiKeyService } from './auth/api-key.service';
+import { extractToken } from './auth/api-keys';
 import type { AppConfig } from './config/config';
 import { HealthService } from './health/health.service';
 import { MetricsService } from './observability/metrics.service';
@@ -18,6 +19,7 @@ const send = (res: ServerResponse, status: number, body: unknown, contentType = 
 export async function startWorkerServer(app: INestApplicationContext, config: AppConfig): Promise<Server> {
   const health = app.get(HealthService, { strict: false });
   const metrics = app.get(MetricsService, { strict: false });
+  const keys = app.get(ApiKeyService, { strict: false });
   const server = createServer((req, res) => {
     void (async () => {
       const path = (req.url ?? '').split('?')[0];
@@ -28,10 +30,10 @@ export async function startWorkerServer(app: INestApplicationContext, config: Ap
           return send(res, ok ? 200 : 503, { status: ok ? 'ok' : 'unavailable', checks });
         }
         if (path === '/metrics') {
-          if (config.apiKeys.length > 0) {
-            const role = authenticate(config.apiKeys, extractToken(req.headers));
-            if (!role) return send(res, 401, { statusCode: 401, code: 'unauthorized', message: 'A valid API key is required' });
-            if (role !== 'admin') return send(res, 403, { statusCode: 403, code: 'forbidden', message: 'This endpoint requires an admin API key' });
+          if (keys.enabled) {
+            const principal = await keys.authenticate(extractToken(req.headers));
+            if (!principal) return send(res, 401, { statusCode: 401, code: 'unauthorized', message: 'A valid API key is required' });
+            if (principal.role !== 'admin') return send(res, 403, { statusCode: 403, code: 'forbidden', message: 'This endpoint requires an admin API key' });
           }
           return send(res, 200, await metrics.render(), 'text/plain; version=0.0.4; charset=utf-8');
         }

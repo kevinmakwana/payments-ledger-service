@@ -1,5 +1,6 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
+import { BullMQOtel } from 'bullmq-otel';
 import { AlertsModule } from './alerts/alerts.module';
 import { AuthModule } from './auth/auth.module';
 import { APP_CONFIG, AppConfig, redisConnection } from './config/config';
@@ -28,6 +29,9 @@ import { WorkerModule } from './worker/worker.module';
       useFactory: (config: AppConfig) => ({
         connection: redisConnection(config.redisUrl),
         prefix: config.queuePrefix,
+        // Producers store the active trace context on each job and workers continue it, so one trace spans
+        // the API request and the background work it caused.
+        telemetry: config.tracingEnabled ? new BullMQOtel({ tracerName: 'payments-ledger-service' }) : undefined,
       }),
     }),
     LedgerModule,

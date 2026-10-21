@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { randomBytes, randomUUID } from 'crypto';
+import { injectTraceHeaders } from './spans';
 
 export interface RequestContext {
   /** Correlates every log line, error response and outgoing call of one request. */
@@ -27,12 +28,19 @@ export function sanitizeRequestId(raw: string | undefined): string | undefined {
 
 const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
 
-export function newContext(headers: Record<string, string | string[] | undefined>): RequestContext {
+/**
+ * `span` is the server span when OpenTelemetry tracing is on: the ids in logs then match the exported trace exactly.
+ * Without it the ids are generated here (continuing an inbound `traceparent`), as before.
+ */
+export function newContext(
+  headers: Record<string, string | string[] | undefined>,
+  span?: { traceId: string; spanId: string },
+): RequestContext {
   const trace = parseTraceparent(first(headers['traceparent']));
   return {
     requestId: sanitizeRequestId(first(headers['x-request-id'])) ?? randomUUID(),
-    traceId: trace?.traceId ?? hex(16),
-    spanId: hex(8),
+    traceId: span?.traceId ?? trace?.traceId ?? hex(16),
+    spanId: span?.spanId ?? hex(8),
   };
 }
 
@@ -44,8 +52,13 @@ export function currentContext(): RequestContext | undefined {
   return als.getStore();
 }
 
-/** Headers for an outgoing call: continues the current trace with a new span. Empty outside a request. */
+/**
+ * Headers for an outgoing call. With OpenTelemetry on, the active span (and its sampling decision) is propagated;
+ * otherwise the request's own trace id continues with a fresh span id. Empty outside a request.
+ */
 export function traceHeaders(): Record<string, string> {
+  const otel = injectTraceHeaders();
+  if (otel.traceparent) return otel;
   const ctx = currentContext();
   return ctx ? { traceparent: `00-${ctx.traceId}-${hex(8)}-01` } : {};
 }

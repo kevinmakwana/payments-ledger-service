@@ -3,6 +3,8 @@ import { ApiKey, parseApiKeys } from '../auth/api-keys';
 export interface AppConfig {
   /** Configured API keys; empty means authentication is disabled (never allowed in production by default). */
   apiKeys: ApiKey[];
+  /** How long an API key issued through the admin API stays cached in this process; bounds how long a revocation takes to reach every instance. */
+  apiKeyCacheTtlMs: number;
   port: number;
   databaseUrl: string;
   redisUrl: string;
@@ -26,6 +28,8 @@ export interface AppConfig {
   /** `json` (one structured line per event, for log pipelines) or `pretty` (Nest's coloured console). Default: json in production. */
   logFormat: 'json' | 'pretty';
   logLevel: 'verbose' | 'debug' | 'info' | 'warn' | 'error';
+  /** OpenTelemetry span export is on (see src/tracing.ts). Queues then carry trace context from producer to worker. */
+  tracingEnabled: boolean;
   /** A provider operation claimed longer ago than this is considered abandoned (crashed process) and can be re-claimed. */
   providerOpLeaseMs: number;
   /** Open operations with at least this many attempts raise a `provider_operation_stuck` alert. */
@@ -45,6 +49,10 @@ export interface AppConfig {
   /** Requests allowed per client IP per window before answering 429. Counted per instance. */
   rateLimitMax: number;
   rateLimitWindowMs: number;
+  /** `redis` shares the counters across instances (a real global limit); `memory` counts per instance. */
+  rateLimitStore: 'memory' | 'redis';
+  /** Deadline for one rate-limit counter call; past it the request is counted in memory instead of waiting. */
+  rateLimitStoreTimeoutMs: number;
   /** Largest accepted JSON request body (express/body-parser syntax, e.g. "256kb"). */
   bodyLimit: string;
   /** Number of reverse-proxy hops to trust for the client IP (X-Forwarded-For); unset = none. */
@@ -81,12 +89,24 @@ export interface AppConfig {
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
 
+/** Tracing is opt-in: it needs an OTLP endpoint (standard OTEL_* variables) and is hard-disabled by OTEL_SDK_DISABLED=true. */
+export function tracingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.OTEL_SDK_DISABLED === 'true') return false;
+  return Boolean(env.OTEL_EXPORTER_OTLP_ENDPOINT || env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
+}
+
 const int = (v: string | undefined, d: number): number => {
   if (v === undefined || v === '') return d;
   const n = Number(v);
   if (!Number.isInteger(n)) throw new Error(`Expected integer env value, got "${v}"`);
   return n;
 };
+
+function rateLimitStore(v: string | undefined): 'memory' | 'redis' {
+  if (v === undefined || v === '') return 'memory';
+  if (v !== 'memory' && v !== 'redis') throw new Error(`RATE_LIMIT_STORE must be memory or redis (got "${v}")`);
+  return v;
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const role = env.APP_ROLE ?? 'all';
@@ -97,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
   return {
     apiKeys,
+    apiKeyCacheTtlMs: int(env.API_KEY_CACHE_TTL_MS, 10_000),
     port: int(env.PORT, 3000),
     databaseUrl: env.DATABASE_URL ?? 'postgres://ledger:ledger@localhost:5432/ledger',
     redisUrl: env.REDIS_URL ?? 'redis://localhost:6379',
@@ -115,6 +136,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     simulatedWebhookBaseUrl: env.SIMULATED_WEBHOOK_BASE_URL || undefined,
     logFormat: env.LOG_FORMAT === 'json' || env.LOG_FORMAT === 'pretty' ? env.LOG_FORMAT : env.NODE_ENV === 'production' ? 'json' : 'pretty',
     logLevel: (['verbose', 'debug', 'info', 'warn', 'error'] as const).find((l) => l === env.LOG_LEVEL) ?? 'info',
+    tracingEnabled: tracingEnabled(env),
     providerOpLeaseMs: int(env.PROVIDER_OP_LEASE_MS, 60_000),
     providerOpMaxAttempts: int(env.PROVIDER_OP_MAX_ATTEMPTS, 10),
     paymentRecoveryAgeMs: int(env.PAYMENT_RECOVERY_AGE_MS, 60_000),
@@ -125,6 +147,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maintenanceCron: env.MAINTENANCE_CRON || '0 4 * * *',
     rateLimitMax: int(env.RATE_LIMIT_MAX, 300),
     rateLimitWindowMs: int(env.RATE_LIMIT_WINDOW_MS, 60_000),
+    rateLimitStore: rateLimitStore(env.RATE_LIMIT_STORE),
+    rateLimitStoreTimeoutMs: int(env.RATE_LIMIT_STORE_TIMEOUT_MS, 250),
     bodyLimit: env.BODY_LIMIT || '256kb',
     trustProxy: env.TRUST_PROXY ? int(env.TRUST_PROXY, 0) : undefined,
     payoutStaleMs: int(env.PAYOUT_STALE_MS, 30 * 60_000),

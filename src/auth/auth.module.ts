@@ -1,23 +1,34 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerGuard, ThrottlerModule, ThrottlerStorage } from '@nestjs/throttler';
 import { APP_CONFIG, AppConfig } from '../config/config';
+import { ApiKeyService } from './api-key.service';
+import { ApiKeysController } from './api-keys.controller';
 import { AuthGuard } from './auth.guard';
+import { RATE_LIMIT_STORAGE, RateLimitModule } from './rate-limit.module';
 
 /**
  * Edge protection. Global guards run in registration order, so the rate limit comes FIRST: it is keyed
  * by client IP, which means an attacker guessing API keys is throttled before the key check even runs
  * (and cannot get a fresh budget by presenting a different key).
- * Counters are in memory, i.e. per instance; a shared Redis store is the upgrade path for exact global limits.
+ * Counters live in Redis when RATE_LIMIT_STORE=redis (one global limit across all API instances) and in memory,
+ * per instance, otherwise.
  */
 @Module({
   imports: [
     ThrottlerModule.forRootAsync({
-      inject: [APP_CONFIG],
-      useFactory: (config: AppConfig) => [{ ttl: config.rateLimitWindowMs, limit: config.rateLimitMax }],
+      imports: [RateLimitModule],
+      inject: [APP_CONFIG, RATE_LIMIT_STORAGE],
+      useFactory: (config: AppConfig, storage: ThrottlerStorage) => ({
+        throttlers: [{ ttl: config.rateLimitWindowMs, limit: config.rateLimitMax }],
+        storage,
+      }),
     }),
   ],
+  controllers: [ApiKeysController],
+  exports: [ApiKeyService],
   providers: [
+    ApiKeyService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
   ],
