@@ -17,6 +17,7 @@
     "test": "jest",
     "test:e2e": "NODE_OPTIONS=--experimental-vm-modules jest --config test/jest-e2e.json --runInBand",
     "demo": "ts-node src/demo/demo.ts",
+    "key:generate": "ts-node src/auth/key-tool.ts",
     "test:cov": "jest --coverage --collectCoverageFrom='**/*.ts' --collectCoverageFrom='!**/*.spec.ts' --collectCoverageFrom='!demo/**'",
     "test:e2e:cov": "NODE_OPTIONS=--experimental-vm-modules jest --config test/jest-e2e.json --runInBand --coverage"
   },

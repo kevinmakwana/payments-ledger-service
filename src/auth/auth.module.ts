@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule, ThrottlerStorage } from '@nestjs/throttler';
 import { APP_CONFIG, AppConfig } from '../config/config';
+import { ApiKeyService } from './api-key.service';
+import { ApiKeysController } from './api-keys.controller';
 import { AuthGuard } from './auth.guard';
 import { RATE_LIMIT_STORAGE, RateLimitModule } from './rate-limit.module';
 
@@ -23,7 +25,10 @@ import { RATE_LIMIT_STORAGE, RateLimitModule } from './rate-limit.module';
       }),
     }),
   ],
+  controllers: [ApiKeysController],
+  exports: [ApiKeyService],
   providers: [
+    ApiKeyService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
   ],

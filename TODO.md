@@ -31,4 +31,4 @@
 ## Phase 4: Platform hardening
 - [x] **T22** OpenTelemetry: export spans over OTLP (HTTP server, provider calls, provider operations, DB, BullMQ jobs) with trace context carried through the queues
 - [x] **T23** Shared Redis rate-limit store, so limits hold across instances (falls back to in-memory if Redis is down)
-- [ ] **T24** Hashed, rotatable API keys: database-backed keys stored as SHA-256, create / list / revoke / rotate endpoints, hashed keys in `API_KEYS`
+- [x] **T24** Hashed, rotatable API keys: database-backed keys stored as SHA-256, create / list / revoke / rotate endpoints, hashed keys in `API_KEYS`

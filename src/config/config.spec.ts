@@ -4,7 +4,7 @@ const KEY = 'sk_admin_0123456789abcdef';
 
 describe('loadConfig authentication settings', () => {
   it('parses API_KEYS into the config', () => {
-    expect(loadConfig({ API_KEYS: `${KEY}:admin` }).apiKeys).toEqual([{ key: KEY, role: 'admin' }]);
+    expect(loadConfig({ API_KEYS: `${KEY}:admin` }).apiKeys).toMatchObject([{ role: 'admin' }]);
   });
 
   it('allows running without keys outside production (local dev, demo, tests)', () => {

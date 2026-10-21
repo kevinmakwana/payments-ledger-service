@@ -3,6 +3,8 @@ import { ApiKey, parseApiKeys } from '../auth/api-keys';
 export interface AppConfig {
   /** Configured API keys; empty means authentication is disabled (never allowed in production by default). */
   apiKeys: ApiKey[];
+  /** How long an API key issued through the admin API stays cached in this process; bounds how long a revocation takes to reach every instance. */
+  apiKeyCacheTtlMs: number;
   port: number;
   databaseUrl: string;
   redisUrl: string;
@@ -115,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
   return {
     apiKeys,
+    apiKeyCacheTtlMs: int(env.API_KEY_CACHE_TTL_MS, 10_000),
     port: int(env.PORT, 3000),
     databaseUrl: env.DATABASE_URL ?? 'postgres://ledger:ledger@localhost:5432/ledger',
     redisUrl: env.REDIS_URL ?? 'redis://localhost:6379',

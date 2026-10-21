@@ -119,6 +119,7 @@ Interactive docs at `/docs` (OpenAPI via `@nestjs/swagger`).
 | GET | `/ledger/accounts/:code` | One account's balance (cached and derived). |
 | GET | `/ledger/accounts/:code/statement` | The account's postings, newest first, each with the running balance after it. |
 | GET | `/ledger/entries` | Journal entries with their postings. Filters: `kind`, `paymentId`, `payoutId`, `accountCode`, `from`, `to`. |
+| POST, GET, DELETE | `/admin/api-keys`, `/admin/api-keys/:id/rotate` | Issue, list, rotate and revoke API keys (admin only). See Authentication. |
 | GET | `/metrics` | Prometheus metrics. Admin key required. |
 | GET | `/health/live` | Liveness: the process is serving. Never touches dependencies. |
 | GET | `/health/ready`, `/health` | Readiness: `200` when Postgres and Redis answer, `503` with per-dependency `up`/`down` otherwise. |
@@ -171,7 +172,19 @@ Every list endpoint returns `{ "data": [...], "nextCursor": "..." | null }` and 
 
 ## Authentication
 
-Set `API_KEYS="<key>:<role>,<key>:<role>"` (keys of 16+ characters; roles `client` or `admin`) and every route requires `Authorization: Bearer <key>` (or `X-API-Key: <key>`). Comparison is constant-time. A malformed `API_KEYS` stops the app at startup.
+Every route requires `Authorization: Bearer <key>` (or `X-API-Key: <key>`) once authentication is on. Keys come from two places:
+
+- **Bootstrap keys in `API_KEYS`** (environment), `"<key>:<role>,<key>:<role>"` with keys of 16+ characters and roles `client` or `admin`. A key can also be given as its digest, `sha256:<64 hex chars>:<role>`, so the secret never sits in an env file or orchestrator config: `npm run key:generate` prints a fresh key with its `API_KEYS` entry (`-- hash <key> [role]` converts an existing one; in a built image run `node dist/auth/key-tool.js`). Only SHA-256 digests are held in memory either way, comparison is constant-time, and a malformed `API_KEYS` stops the app at startup. These keys never touch the database, so they keep working if it is down. Keep at least one admin bootstrap key: it is how the first database key is issued.
+- **Issued keys in the database**, managed with admin-only endpoints. Tokens look like `plk_` + 43 random characters (256 bits). Only the SHA-256 is stored, plus a short non-secret prefix so a key can be recognised in a list; the secret is returned **once**, in the response that creates it.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/admin/api-keys` | `{ name, role, expiresInDays? }` → the new key (`key` field holds the secret; store it now). |
+| GET | `/admin/api-keys` | List keys, newest first (paginated): metadata, `status` (`active`, `expired`, `revoked`), `lastUsedAt`, `createdBy`. Never the secret. |
+| POST | `/admin/api-keys/:id/rotate` | `{ graceSeconds? (default 86400, 0 = retire now), expiresInDays? }` → a replacement with the same name and role; the old key keeps working for the grace period, so clients can switch over without downtime. A key can be rotated once; rotate its replacement next time. |
+| DELETE | `/admin/api-keys/:id` | Revoke (idempotent). |
+
+Issued keys are cached per process for `API_KEY_CACHE_TTL_MS` (default 10 s) so authenticating costs no query: a revocation is immediate on the instance that handles it and reaches the others within that time; a key's own expiry is always honoured exactly. If the database is unreachable, an issued key gets `503 auth_unavailable` (never a silent pass); bootstrap keys still work. Every create, rotate and revoke is logged with the acting key's id (`env:<fingerprint>` for bootstrap keys, the key's uuid otherwise), and `lastUsedAt` is updated at most once a minute per key. Keys are per role, not per seller or client.
 
 | Role | Can call |
 | --- | --- |
@@ -181,7 +194,7 @@ Set `API_KEYS="<key>:<role>,<key>:<role>"` (keys of 16+ characters; roles `clien
 
 Missing or unknown key: `401 {"code":"unauthorized"}`. Client key on an admin route: `403 {"code":"forbidden"}`.
 
-With `API_KEYS` unset, authentication is **off** and the app logs a warning at startup (this keeps `npm run demo` and local dev frictionless). With `NODE_ENV=production` the app refuses to start without keys unless you set `ALLOW_UNAUTHENTICATED=true` on purpose. Keys live in the environment for now; hashed, rotatable keys in the database are a natural next step.
+With `API_KEYS` unset, authentication is **off** and the app logs a warning at startup (this keeps `npm run demo` and local dev frictionless). With `NODE_ENV=production` the app refuses to start without keys unless you set `ALLOW_UNAUTHENTICATED=true` on purpose.
 
 ## Deployment
 
@@ -269,12 +282,12 @@ The Stripe and Razorpay drivers implement the same `PaymentProvider` interface a
 
 All via environment variables, see [.env.example](.env.example): fee (`PLATFORM_FEE_BPS`), `PAYOUT_HOLD_DAYS`, `PAYOUT_RESERVE_MINOR`, `PAYOUT_MIN_MINOR`, `PAYOUT_MAX_ATTEMPTS`, webhook tolerance / attempts / backoff, and `SCHEDULERS_ENABLED`.
 
-Auth: `API_KEYS`, `ALLOW_UNAUTHENTICATED`. Process: `APP_ROLE`, `WORKER_PORT`, `SIMULATED_WEBHOOK_BASE_URL`. Logging: `LOG_FORMAT`, `LOG_LEVEL`. Edge: `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_STORE`, `RATE_LIMIT_STORE_TIMEOUT_MS`, `BODY_LIMIT`, `TRUST_PROXY`. Tracing: `OTEL_EXPORTER_OTLP_ENDPOINT` and the other standard `OTEL_*` variables. Outbox: `PROVIDER_OP_LEASE_MS`, `PROVIDER_OP_MAX_ATTEMPTS`, `PAYMENT_RECOVERY_AGE_MS`, `PAYMENT_RECOVERY_CRON`, `AUTHORIZATION_TTL_HOURS`. Retention: `IDEMPOTENCY_KEY_TTL_HOURS`, `WEBHOOK_RETENTION_DAYS`, `MAINTENANCE_CRON`. Payout sweeper: `PAYOUT_STALE_MS`, `PAYOUT_AWAITING_PROVIDER_MS`, `PAYOUT_SWEEP_CRON`. Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
+Auth: `API_KEYS`, `API_KEY_CACHE_TTL_MS`, `ALLOW_UNAUTHENTICATED`. Process: `APP_ROLE`, `WORKER_PORT`, `SIMULATED_WEBHOOK_BASE_URL`. Logging: `LOG_FORMAT`, `LOG_LEVEL`. Edge: `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_STORE`, `RATE_LIMIT_STORE_TIMEOUT_MS`, `BODY_LIMIT`, `TRUST_PROXY`. Tracing: `OTEL_EXPORTER_OTLP_ENDPOINT` and the other standard `OTEL_*` variables. Outbox: `PROVIDER_OP_LEASE_MS`, `PROVIDER_OP_MAX_ATTEMPTS`, `PAYMENT_RECOVERY_AGE_MS`, `PAYMENT_RECOVERY_CRON`, `AUTHORIZATION_TTL_HOURS`. Retention: `IDEMPOTENCY_KEY_TTL_HOURS`, `WEBHOOK_RETENTION_DAYS`, `MAINTENANCE_CRON`. Payout sweeper: `PAYOUT_STALE_MS`, `PAYOUT_AWAITING_PROVIDER_MS`, `PAYOUT_SWEEP_CRON`. Operational settings: `PROVIDER_TIMEOUT_MS`, `HEALTH_CHECK_TIMEOUT_MS`, `ALERT_WEBHOOK_URL`, `ALERT_TIMEOUT_MS`, `ALERT_DLQ_THRESHOLD`, `MONITOR_CRON`. `STRIPE_API_BASE` / `RAZORPAY_API_BASE` override the provider API URLs (used by the tests to point the real drivers at a local fake server).
 
 ## Next steps
 
 - Multi-currency payouts and FX postings; per-seller reserve policies
-- Per-tenant API keys (keys today are per role, not per seller or client)
+- Per-tenant API keys scoped to a seller or client (keys today carry a role, not a tenant)
 - Reconciliation: a mismatch resolution workflow and auto-matching of late webhooks (reports are already persisted per provider and day, and mismatches raise an alert)
 
 ## License
