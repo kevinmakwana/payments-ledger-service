@@ -8,7 +8,7 @@ import {
   WebhookEvent,
   WebhookVerificationError,
 } from './provider.interface';
-import { MAX_LIST_PAGES, ProviderResponse, providerRequest } from './http';
+import { MAX_LIST_PAGES, minorUnits, ProviderResponse, providerRequest } from './http';
 import { headerValue, verifyTimestamped } from './signature';
 
 /**
@@ -41,8 +41,19 @@ export class StripeProvider implements PaymentProvider {
   }
 
   async capture(req: Parameters<PaymentProvider['capture']>[0]) {
-    const pi = await this.post(`/payment_intents/${req.providerRef}/capture`, { amount_to_capture: req.amount }, req.idempotencyKey);
-    return { reportedRef: pi.latest_charge as string };
+    // Expanding the balance transaction returns the fee in the same call. Stripe creates it asynchronously, so it can
+    // still be null here; reconciliation books the fee later from the balance-transaction listing.
+    const pi = await this.post(
+      `/payment_intents/${req.providerRef}/capture`,
+      { amount_to_capture: req.amount, 'expand[]': 'latest_charge.balance_transaction' },
+      req.idempotencyKey,
+    );
+    const charge = pi.latest_charge;
+    const reportedRef = (typeof charge === 'string' ? charge : charge?.id) as string;
+    const bt = typeof charge === 'object' && charge ? charge.balance_transaction : undefined;
+    // The fee is in the balance transaction's (settlement) currency: only use it when that is the payment's currency.
+    const fee = bt && typeof bt === 'object' && String(bt.currency).toLowerCase() === req.currency.toLowerCase() ? minorUnits(bt.fee) : undefined;
+    return { reportedRef, fee };
   }
 
   async void(req: { paymentId: string; providerRef: string; idempotencyKey: string }): Promise<void> {
@@ -84,6 +95,7 @@ export class StripeProvider implements PaymentProvider {
           amount: Math.abs(t.amount as number),
           currency: String(t.currency).toUpperCase(),
           createdAt: new Date((t.created as number) * 1000).toISOString(),
+          ...(kinds[t.type] === 'charge' ? { fee: minorUnits(t.fee) } : {}),
         });
       }
       if (!res.has_more || data.length === 0) return out;

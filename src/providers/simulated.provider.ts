@@ -57,10 +57,12 @@ export class SimulatedProvider implements PaymentProvider {
   }
 
   async capture(req: { paymentId: string; providerRef: string; amount: number; currency: string; idempotencyKey: string }) {
-    if (await this.record(req.providerRef, 'charge', req.amount, req.currency)) {
+    // Deterministic from the amount, so a replayed capture reports the same fee.
+    const fee = Math.min(req.amount, Math.round((req.amount * this.config.simulatedFeeBps) / 10_000) + this.config.simulatedFeeFixedMinor);
+    if (await this.record(req.providerRef, 'charge', req.amount, req.currency, undefined, fee)) {
       this.emit('payment.captured', { paymentId: req.paymentId, providerRef: req.providerRef, amount: req.amount });
     }
-    return { reportedRef: req.providerRef };
+    return { reportedRef: req.providerRef, fee };
   }
 
   async void(_req: { paymentId: string; providerRef: string; idempotencyKey: string }): Promise<void> {
@@ -94,6 +96,7 @@ export class SimulatedProvider implements PaymentProvider {
       currency: string;
       parent_ref: string | null;
       created_at: Date;
+      fee: number;
     }>(
       `SELECT * FROM sim_provider_transactions
         WHERE (created_at AT TIME ZONE 'UTC')::date = $1::date ORDER BY created_at, id`,
@@ -106,6 +109,7 @@ export class SimulatedProvider implements PaymentProvider {
       currency: t.currency.trim(),
       parentRef: t.parent_ref ?? undefined,
       createdAt: t.created_at.toISOString(),
+      ...(t.type === 'charge' ? { fee: t.fee } : {}),
     }));
   }
 
@@ -127,21 +131,22 @@ export class SimulatedProvider implements PaymentProvider {
   }
 
   /** Test/demo hooks: mutate the provider's books to create reconciliation mismatches. */
-  async tamper(op: { remove?: string; setAmount?: { id: string; amount: number }; add?: ProviderTransaction }): Promise<void> {
+  async tamper(op: { remove?: string; setAmount?: { id: string; amount: number }; setFee?: { id: string; fee: number }; add?: ProviderTransaction }): Promise<void> {
     if (op.remove) await this.db.query('DELETE FROM sim_provider_transactions WHERE id = $1', [op.remove]);
     if (op.setAmount) {
       await this.db.query('UPDATE sim_provider_transactions SET amount = $2 WHERE id = $1', [op.setAmount.id, op.setAmount.amount]);
     }
+    if (op.setFee) await this.db.query('UPDATE sim_provider_transactions SET fee = $2 WHERE id = $1', [op.setFee.id, op.setFee.fee]);
     if (op.add) {
-      await this.record(op.add.id, op.add.type, op.add.amount, op.add.currency, op.add.parentRef);
+      await this.record(op.add.id, op.add.type, op.add.amount, op.add.currency, op.add.parentRef, op.add.fee);
     }
   }
 
   /** Inserts into the provider's books once; returns false if this id was already recorded. */
-  private async record(id: string, type: ProviderTransaction['type'], amount: number, currency: string, parentRef?: string): Promise<boolean> {
+  private async record(id: string, type: ProviderTransaction['type'], amount: number, currency: string, parentRef?: string, fee = 0): Promise<boolean> {
     const r = await this.db.query(
-      'INSERT INTO sim_provider_transactions (id, type, amount, currency, parent_ref) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING',
-      [id, type, amount, currency, parentRef ?? null],
+      'INSERT INTO sim_provider_transactions (id, type, amount, currency, parent_ref, fee) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING',
+      [id, type, amount, currency, parentRef ?? null, fee],
     );
     return (r.rowCount ?? 0) > 0;
   }

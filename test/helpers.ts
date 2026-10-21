@@ -83,7 +83,7 @@ export async function startApp(env: Record<string, string> = {}, opts: { logger?
 
 export async function resetDb(db: DbService): Promise<void> {
   await db.query(`TRUNCATE accounts, journal_entries, postings, account_balances, payments, refunds, idempotency_keys,
-    webhook_events, payouts, reconciliation_reports, sim_provider_transactions, api_keys RESTART IDENTITY CASCADE`);
+    webhook_events, payouts, reconciliation_reports, sim_provider_transactions, api_keys, reconciliation_items RESTART IDENTITY CASCADE`);
 }
 
 export async function waitFor<T>(fn: () => Promise<T | undefined | false>, timeoutMs = 15000, what = 'condition'): Promise<T> {

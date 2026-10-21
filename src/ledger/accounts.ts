@@ -20,6 +20,13 @@ export const fees = (currency: string): AccountRef => ({
   currency,
 });
 
+/** What the payment providers charge the platform for processing (an expense: it comes out of the platform's fee revenue). */
+export const providerFees = (currency: string): AccountRef => ({
+  code: `platform:provider_fees:${currency}`,
+  type: 'expense',
+  currency,
+});
+
 /** What the platform owes a seller. */
 export const sellerPayable = (sellerId: string, currency: string): AccountRef => ({
   code: `seller:${sellerId}:${currency}`,

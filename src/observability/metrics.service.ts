@@ -128,6 +128,26 @@ export class MetricsService {
       },
     });
     new Gauge({
+      name: 'reconciliation_items',
+      help: 'Tracked reconciliation discrepancies by status (open ones need attention)',
+      labelNames: ['status'],
+      registers: [this.registry],
+      async collect() {
+        const r = await db_.query<{ status: string; n: number }>('SELECT status, count(*)::int AS n FROM reconciliation_items GROUP BY status');
+        const by = new Map(r.rows.map((row) => [row.status, row.n]));
+        for (const status of ['open', 'ignored', 'resolved']) this.set({ status }, by.get(status) ?? 0);
+      },
+    });
+    new Gauge({
+      name: 'reconciliation_oldest_open_item_age_seconds',
+      help: 'Age of the oldest open reconciliation discrepancy (0 when there is none)',
+      registers: [this.registry],
+      async collect() {
+        const r = await db_.query<{ age: number }>("SELECT COALESCE(EXTRACT(EPOCH FROM now() - min(first_seen_at)), 0)::float8 AS age FROM reconciliation_items WHERE status = 'open'");
+        this.set(Math.round(r.rows[0].age));
+      },
+    });
+    new Gauge({
       name: 'payouts_pending',
       help: 'Payouts created but not yet paid or failed',
       registers: [this.registry],

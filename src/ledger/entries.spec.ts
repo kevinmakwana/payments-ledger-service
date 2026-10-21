@@ -8,6 +8,8 @@ import {
   payoutInitiatedLines,
   payoutReversedLines,
   payoutSettledLines,
+  providerFeeAdjustmentLines,
+  providerFeeLines,
   refundLines,
 } from './entries';
 import { assertBalanced, UnbalancedEntryError } from './ledger.service';
@@ -127,3 +129,24 @@ describe('dispute entries', () => {
   });
 });
 
+
+describe('provider fee entries', () => {
+  it('books the fee as an expense paid out of the provider balance, balanced, and never touches a seller', () => {
+    const lines = providerFeeLines({ currency: 'USD', amount: 320 });
+    expect(lines.map((l) => [l.account.code, l.amount])).toEqual([
+      ['platform:provider_fees:USD', 320],
+      ['platform:clearing:USD', -320],
+    ]);
+    expect(() => assertBalanced(lines)).not.toThrow();
+  });
+
+  it('adjusts in either direction, always balanced', () => {
+    const up = providerFeeAdjustmentLines({ currency: 'USD', delta: 80 });
+    const down = providerFeeAdjustmentLines({ currency: 'USD', delta: -100 });
+    expect(up.find((l) => l.account.code.includes('provider_fees'))!.amount).toBe(80);
+    expect(down.find((l) => l.account.code.includes('provider_fees'))!.amount).toBe(-100);
+    expect(down.find((l) => l.account.code.includes('clearing'))!.amount).toBe(100);
+    expect(() => assertBalanced(up)).not.toThrow();
+    expect(() => assertBalanced(down)).not.toThrow();
+  });
+});

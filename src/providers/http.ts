@@ -5,6 +5,9 @@ import { SpanKind, withSpan } from '../observability/spans';
 /** Hard stop for paginated listings, so a misbehaving API can never loop forever (or silently truncate). */
 export const MAX_LIST_PAGES = 500;
 
+/** A non-negative integer amount, or undefined when the field is absent, null or malformed (never guess a fee). */
+export const minorUnits = (v: unknown): number | undefined => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
+
 export interface ProviderResponse {
   ok: boolean;
   status: number;

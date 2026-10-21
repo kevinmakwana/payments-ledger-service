@@ -44,6 +44,10 @@ export interface AppConfig {
   idempotencyKeyTtlHours: number;
   /** Processed webhook events older than this are deleted (received and dead-lettered events are never purged). */
   webhookRetentionDays: number;
+  /** The nightly reconciliation re-checks this many days ending yesterday, so a late webhook closes yesterday's open items by itself. */
+  reconciliationLookbackDays: number;
+  /** An open reconciliation item older than this raises a `reconciliation_item_stale` alert every night until someone resolves or ignores it. */
+  reconciliationStaleDays: number;
   /** Cron (UTC) for the retention job. */
   maintenanceCron: string;
   /** Requests allowed per client IP per window before answering 429. Counted per instance. */
@@ -67,6 +71,9 @@ export interface AppConfig {
   webhookMaxAttempts: number;
   webhookBackoffMs: number;
   simulatedWebhookSecret: string;
+  /** Processing fee the simulated provider charges per capture: basis points of the amount plus a fixed part (minor units). Default none. */
+  simulatedFeeBps: number;
+  simulatedFeeFixedMinor: number;
   /** Upper bound for one provider HTTP call (request + response body). */
   providerTimeoutMs: number;
   /** Per-dependency deadline for /health/ready. */
@@ -144,6 +151,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     authorizationTtlHours: int(env.AUTHORIZATION_TTL_HOURS, 168),
     idempotencyKeyTtlHours: int(env.IDEMPOTENCY_KEY_TTL_HOURS, 168),
     webhookRetentionDays: int(env.WEBHOOK_RETENTION_DAYS, 30),
+    reconciliationLookbackDays: Math.max(1, int(env.RECONCILIATION_LOOKBACK_DAYS, 3)),
+    reconciliationStaleDays: Math.max(1, int(env.RECONCILIATION_STALE_DAYS, 3)),
     maintenanceCron: env.MAINTENANCE_CRON || '0 4 * * *',
     rateLimitMax: int(env.RATE_LIMIT_MAX, 300),
     rateLimitWindowMs: int(env.RATE_LIMIT_WINDOW_MS, 60_000),
@@ -158,6 +167,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     webhookMaxAttempts: int(env.WEBHOOK_MAX_ATTEMPTS, 5),
     webhookBackoffMs: int(env.WEBHOOK_BACKOFF_MS, 1000),
     simulatedWebhookSecret: env.SIMULATED_WEBHOOK_SECRET ?? 'whsec_simulated_dev',
+    simulatedFeeBps: int(env.SIMULATED_FEE_BPS, 0),
+    simulatedFeeFixedMinor: int(env.SIMULATED_FEE_FIXED_MINOR, 0),
     providerTimeoutMs: int(env.PROVIDER_TIMEOUT_MS, 15_000),
     healthCheckTimeoutMs: int(env.HEALTH_CHECK_TIMEOUT_MS, 2000),
     alertWebhookUrl: env.ALERT_WEBHOOK_URL || undefined,
