@@ -53,7 +53,7 @@ export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy 
   constructor(
     private readonly redis: Redis,
     private readonly prefix: string,
-    private readonly onFallback: () => void = () => undefined,
+    private readonly onFallback: (err: unknown) => void = () => undefined,
   ) {
     redis.defineCommand('rateLimitHit', { numberOfKeys: 2, lua: HIT_SCRIPT });
     redis.on('error', () => undefined); // reported through the fallback path instead
@@ -82,7 +82,7 @@ export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy 
       const [hits, windowMs, blocked, blockMs] = await (this.redis as RedisWithHit).rateLimitHit(base, `${base}:block`, ttl, limit, Math.max(blockDuration, 0));
       return { totalHits: hits, timeToExpire: Math.ceil(windowMs / 1000), isBlocked: blocked === 1, timeToBlockExpire: Math.ceil(blockMs / 1000) };
     } catch (err) {
-      this.onFallback();
+      this.onFallback(err);
       const now = Date.now();
       if (now - this.lastWarnAt > 30_000) {
         this.lastWarnAt = now;
