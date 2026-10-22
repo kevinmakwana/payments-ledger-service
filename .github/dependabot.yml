@@ -9,6 +9,13 @@ updates:
         patterns: ["@nestjs/*"]
       dev-tooling:
         dependency-type: development
+    ignore:
+      # ts-jest and typescript-eslint do not support TypeScript 7 yet (peer ranges stop at <7 and <6.1).
+      - dependency-name: typescript
+        versions: [">=7"]
+      # Types follow the oldest Node the image and package.json support (22), not the newest release.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

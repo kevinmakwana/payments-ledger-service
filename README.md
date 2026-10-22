@@ -15,7 +15,7 @@ The point of the repo is the money-handling mechanics that are easy to get subtl
 
 ## Quick start
 
-Requires Node 20+ and Docker.
+Requires Node 20.19+ (or 22.12+) and Docker. Running the test suites needs Node 24.9+: Nest 12 ships ESM-only and Jest can load it only there.
 
 ```bash
 cp .env.example .env            # optional; change POSTGRES_PORT / REDIS_PORT if 5432 / 6379 are taken
