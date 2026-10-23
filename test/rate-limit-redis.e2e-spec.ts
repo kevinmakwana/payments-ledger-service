@@ -4,7 +4,8 @@ import { RedisThrottlerStorage, rateLimitRedis } from '../src/auth/redis-throttl
 import { redisConnection } from '../src/config/config';
 import { RATE_LIMIT_STORAGE } from '../src/auth/rate-limit.module';
 import { MetricsService } from '../src/observability/metrics.service';
-import { describeE2E, startApp, TestApp } from './helpers';
+import { FakeHttp, respondJson, startFakeHttp } from './fake-http';
+import { describeE2E, startApp, TestApp, waitFor } from './helpers';
 
 const url = () => process.env.REDIS_URL!;
 
@@ -109,12 +110,15 @@ describeE2E('Redis rate-limit store (e2e)', () => {
 
   describe('when Redis is unavailable', () => {
     let t: TestApp;
+    let hook: FakeHttp;
     beforeAll(async () => {
-      t = await startApp({ RATE_LIMIT_STORE: 'redis', RATE_LIMIT_MAX: '4', RATE_LIMIT_WINDOW_MS: '60000' });
+      hook = await startFakeHttp((_req, res) => respondJson(res, 200, { ok: true }));
+      t = await startApp({ RATE_LIMIT_STORE: 'redis', RATE_LIMIT_MAX: '4', RATE_LIMIT_WINDOW_MS: '60000', ALERT_WEBHOOK_URL: hook.url });
     });
     afterAll(async () => {
       await t.close();
-      for (const k of ['RATE_LIMIT_STORE', 'RATE_LIMIT_MAX', 'RATE_LIMIT_WINDOW_MS']) delete process.env[k];
+      await hook.close();
+      for (const k of ['RATE_LIMIT_STORE', 'RATE_LIMIT_MAX', 'RATE_LIMIT_WINDOW_MS', 'ALERT_WEBHOOK_URL']) delete process.env[k];
     });
 
     it('fails open to per-instance counting: no 500s, the limit still holds, and the fallback is counted', async () => {
@@ -126,6 +130,13 @@ describeE2E('Redis rate-limit store (e2e)', () => {
       expect(statuses).toEqual([404, 404, 404, 404, 429]);
       const metrics = await t.app.get(MetricsService).registry.getSingleMetricAsString('rate_limit_store_fallbacks_total');
       expect(Number(/rate_limit_store_fallbacks_total (\d+)/.exec(metrics)?.[1])).toBeGreaterThanOrEqual(5);
+    });
+
+    it('raises one alert for the outage, not one per request', async () => {
+      await waitFor(async () => hook.requests.length > 0, 5000, 'the outage alert');
+      const alerts = hook.requests.map((r) => JSON.parse(r.body)).filter((a) => a.kind === 'rate_limit_store_unavailable');
+      expect(alerts).toHaveLength(1); // at least 5 requests fell back in the test above
+      expect(alerts[0]).toMatchObject({ severity: 'warning', details: { requestsCountedInMemory: 1 } });
     });
   });
 });

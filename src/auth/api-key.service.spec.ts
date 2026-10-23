@@ -12,7 +12,16 @@ function service(query: jest.Mock, env: Record<string, string> = {}) {
 }
 const found = (role = 'client', expires: Date | null = null) => jest.fn().mockResolvedValue({ rows: [{ id: 'key-1', role, expires_at: expires }] });
 
+/** A frozen Date.now() that only moves when told to, so the cache-expiry tests do not depend on how fast the machine is. */
+function fakeClock() {
+  let t = Date.now();
+  jest.spyOn(Date, 'now').mockImplementation(() => t);
+  return { advance: (ms: number) => (t += ms) };
+}
+
 describe('ApiKeyService.authenticate', () => {
+  afterEach(() => jest.restoreAllMocks());
+
   it('never queries the database for tokens that are not in the issued format', async () => {
     const query = jest.fn();
     const svc = service(query);
@@ -34,11 +43,12 @@ describe('ApiKeyService.authenticate', () => {
   it('caches a found key for API_KEY_CACHE_TTL_MS, then looks it up again', async () => {
     const query = found();
     const svc = service(query, { API_KEY_CACHE_TTL_MS: '50' });
+    const clock = fakeClock();
     const token = generateToken();
     expect(await svc.authenticate(token)).toEqual({ role: 'client', keyId: 'key-1', source: 'database' });
     await svc.authenticate(token);
     expect(query.mock.calls.filter(([sql]) => /SELECT/.test(sql))).toHaveLength(1);
-    await new Promise((r) => setTimeout(r, 80));
+    clock.advance(80);
     await svc.authenticate(token);
     expect(query.mock.calls.filter(([sql]) => /SELECT/.test(sql))).toHaveLength(2);
   });
@@ -52,10 +62,11 @@ describe('ApiKeyService.authenticate', () => {
   });
 
   it('stops serving a cached key as soon as its own expiry passes, whatever the cache TTL', async () => {
+    const clock = fakeClock();
     const svc = service(found('client', new Date(Date.now() + 60)), { API_KEY_CACHE_TTL_MS: '60000' });
     const token = generateToken();
     expect(await svc.authenticate(token)).toBeDefined();
-    await new Promise((r) => setTimeout(r, 100));
+    clock.advance(100);
     // second lookup misses the cache and the (mocked) database still returns the row, so only the cache check is under test
     const query = jest.fn().mockResolvedValue({ rows: [] });
     (svc as unknown as { db: { query: jest.Mock } }).db.query = query;

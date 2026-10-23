@@ -71,6 +71,11 @@ describeE2E('OpenTelemetry export (e2e, against a fake OTLP collector)', () => {
     expect(spans.some((s) => /health|metrics/.test(s.name))).toBe(false);
   });
 
+  it('does not export BullMQ\'s own upkeep (stalled-job checks, lock renewals, polling) as one-span traces', () => {
+    const upkeep = spans.filter((s) => s.kind === 1 && !s.parentSpanId && attr(s, 'bullmq.queue.operation') !== undefined);
+    expect(upkeep.map((s) => s.name)).toEqual([]);
+  });
+
   it('carries the trace through the queue: the worker\'s job span belongs to the request that enqueued it', () => {
     const hook = spans.find((s) => s.name === 'POST /webhooks/:provider');
     expect(hook).toBeDefined();

@@ -32,6 +32,7 @@
 - [x] **T22** OpenTelemetry: export spans over OTLP (HTTP server, provider calls, provider operations, DB, BullMQ jobs) with trace context carried through the queues
 - [x] **T23** Shared Redis rate-limit store, so limits hold across instances (falls back to in-memory if Redis is down)
 - [x] **T24** Hashed, rotatable API keys: database-backed keys stored as SHA-256, create / list / revoke / rotate endpoints, hashed keys in `API_KEYS`
+- [x] **T24a** Follow-ups: BullMQ upkeep spans filtered in code instead of in the collector; alert (`rate_limit_store_unavailable`) when the Redis rate-limit store fails over to memory
 
 ## Phase 5: Money correctness
 - [x] **T25** Persisted reconciliation items with a lifecycle (open / resolved / ignored): mismatches are auto-resolved when a later run finds them matched, a lookback window re-checks recent days, and a ±1 day window stops UTC day-boundary false positives
