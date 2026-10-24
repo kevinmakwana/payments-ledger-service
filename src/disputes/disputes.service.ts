@@ -3,7 +3,7 @@ import { RetryableWebhookError } from '../common/errors';
 import { cumulativeFeeRefund } from '../common/money';
 import { decodeCursor, isPgTimestamp, isUuid, Page, pageOf, resolveLimit, Where } from '../common/pagination';
 import { DbService } from '../db/db.service';
-import { disputeLostLines, disputeOpenedLines, disputeWonLines } from '../ledger/entries';
+import { disputeFeeLines, disputeLostLines, disputeOpenedLines, disputeWonLines } from '../ledger/entries';
 import { LedgerService } from '../ledger/ledger.service';
 import { WebhookEvent } from '../providers/provider.interface';
 
@@ -59,7 +59,7 @@ export class DisputesService {
   }
 
   async open(provider: string, event: WebhookEvent): Promise<void> {
-    const { disputeRef, providerRef, amount: eventAmount, reason } = event.data;
+    const { disputeRef, providerRef, amount: eventAmount, reason, fee } = event.data;
     if (!disputeRef || !providerRef) throw new Error('dispute event without dispute or payment reference');
     await this.db.tx(async (client) => {
       const found = await client.query<{ id: string; seller_id: string; amount: number; fee_amount: number; currency: string; status: string }>(
@@ -91,6 +91,16 @@ export class DisputesService {
         description: `Dispute ${disputeRef} opened on payment ${p.id}`,
         lines: disputeOpenedLines({ sellerId: p.seller_id, currency, amount, feePart }),
       });
+      // The provider charges for handling the dispute whatever the outcome; it is the platform's cost, not the seller's.
+      if (typeof fee === 'number' && Number.isSafeInteger(fee) && fee > 0) {
+        await this.ledger.post(client, {
+          kind: 'dispute_fee',
+          referenceKey: `dispute:${created.rows[0].id}:fee`,
+          paymentId: p.id,
+          description: `Provider fee for dispute ${disputeRef} on payment ${p.id}`,
+          lines: disputeFeeLines({ currency, amount: fee }),
+        });
+      }
     });
   }
 

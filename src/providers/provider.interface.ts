@@ -29,6 +29,8 @@ export interface WebhookEvent {
     payoutRef?: string;
     amount?: number;
     reason?: string;
+    /** Fee the provider charged for handling a dispute, in minor units of the dispute's currency (on `dispute.opened`). */
+    fee?: number;
   };
 }
 

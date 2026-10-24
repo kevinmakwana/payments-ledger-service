@@ -12,6 +12,18 @@ import { MAX_LIST_PAGES, minorUnits, ProviderResponse, providerRequest } from '.
 import { headerValue, verifyTimestamped } from './signature';
 
 /**
+ * The dispute fee is on the balance transactions Stripe attaches to a dispute (the withdrawal, and its fee). Only fees in
+ * the dispute's own currency are used: the ledger holds the payment's currency, and Stripe settles in the account's.
+ */
+function disputeFee(balanceTransactions: unknown, currency: string): { fee?: number } {
+  if (!Array.isArray(balanceTransactions)) return {};
+  const fee = balanceTransactions
+    .filter((bt) => bt && String(bt.currency).toUpperCase() === currency && Number.isSafeInteger(bt.fee) && bt.fee > 0)
+    .reduce((sum, bt) => sum + (bt.fee as number), 0);
+  return fee > 0 ? { fee } : {};
+}
+
+/**
  * Stripe Connect driver (separate charges and transfers). Same interface as the simulator;
  * needs STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET. Not exercised in CI (no keys there).
  * Sellers are Connect account ids (acct_...), payouts are Transfers to them.
@@ -124,7 +136,8 @@ export class StripeProvider implements PaymentProvider {
         case 'charge.dispute.closed': {
           // `warning_*` statuses are inquiries: the bank asked a question but withdrew no funds, so nothing may hit the ledger.
           const status = String(o.status ?? '');
-          const data = { disputeRef: o.id, providerRef: o.payment_intent, amount: o.amount, currency: String(o.currency ?? '').toUpperCase(), reason: o.reason };
+          const currency = String(o.currency ?? '').toUpperCase();
+          const data = { disputeRef: o.id, providerRef: o.payment_intent, amount: o.amount, currency, reason: o.reason, ...disputeFee(o.balance_transactions, currency) };
           if (status.startsWith('warning_')) return { ...base, type: 'dispute.inquiry', data };
           if (e.type === 'charge.dispute.created') return { ...base, type: 'dispute.opened', data };
           if (status === 'won') return { ...base, type: 'dispute.won', data };

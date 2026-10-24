@@ -69,6 +69,24 @@ describeE2E('disputes, chargebacks and provider failures (e2e, real Postgres + R
       expect(await bal('seller:disp_part:USD')).toBe(5400);
     });
 
+    it('books the provider\'s dispute fee as the platform\'s cost, once, whatever the outcome', async () => {
+      const p = await sale('disp_fee');
+      await send('dispute.opened', dispute(p, { fee: 1500 }));
+      await send('dispute.opened', dispute(p, { fee: 1500 })); // duplicate delivery
+      await waitStatus('open');
+      await t.drain();
+      expect((await t.db.query("SELECT count(*)::int AS n FROM journal_entries WHERE kind = 'dispute_fee'")).rows[0].n).toBe(1);
+      expect(await bal('platform:provider_fees:USD')).toBe(1500); // the simulator charges no capture fee in this suite
+      expect(await bal('seller:disp_fee:USD')).toBe(0); // the seller does not bear it
+      const m = (await t.call('GET', '/reports/margin')).body.currencies[0];
+      expect(m.providerFees).toBe(1500);
+      expect(await balanced()).toBe(true);
+      await send('dispute.lost', dispute(p));
+      await waitStatus('lost');
+      expect(await bal('platform:provider_fees:USD')).toBe(1500); // unchanged by the outcome
+      expect(await balanced()).toBe(true);
+    });
+
     it('ignores inquiries (no funds withdrawn) without touching the ledger', async () => {
       const p = await sale('disp_inq');
       await send('dispute.inquiry', dispute(p));

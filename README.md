@@ -166,14 +166,16 @@ Every list endpoint returns `{ "data": [...], "nextCursor": "..." | null }` and 
 - Disputes are idempotent (the provider's dispute id is unique) and tolerant of ordering: an outcome that arrives before the opening, or an opening for a payment we have not committed yet, is retried by the webhook queue and dead-lettered with an alert if it never resolves. Stripe `warning_*` statuses are inquiries (no funds withdrawn) and never touch the ledger.
 - Money under an open dispute, or lost to one, is excluded from what can be refunded, so it cannot be paid out twice.
 - **Negative balances:** a refund or lost dispute after payout can leave a seller owing the platform. `GET /sellers/:id/balance` reports `owesPlatform`; nothing is payable until new sales cover the debt, and payouts net it automatically (new sales minus what is owed, minus the reserve). The monitor raises a `seller_negative_balance` warning so a human can decide whether to collect sooner.
-- `payment.failed` (Stripe `payment_intent.payment_failed`, Razorpay `payment.failed`) marks a not-yet-captured payment `failed`. For money that was already captured it raises a critical `payment_failed_after_capture` alert and changes nothing, because money may already have moved. Not modelled yet: provider dispute fees, and Razorpay `payment.dispute.closed` / `under_review` (stored, not acted on). The Razorpay dispute payloads follow Razorpay's published docs; the `lost` sample could not be confirmed, and like the other live drivers they have not been exercised against the real API.
+- `payment.failed` (Stripe `payment_intent.payment_failed`, Razorpay `payment.failed`) marks a not-yet-captured payment `failed`. For money that was already captured it raises a critical `payment_failed_after_capture` alert and changes nothing, because money may already have moved. Not modelled yet: Razorpay `payment.dispute.closed` / `under_review` (stored, not acted on). The Razorpay dispute payloads follow Razorpay's published docs; the `lost` sample could not be confirmed, and like the other live drivers they have not been exercised against the real API.
 
 **Provider fees**
 
 - What Stripe, Razorpay or the simulator charge to process a payment is booked as an expense: `Dr platform:provider_fees / Cr platform:clearing` (kind `provider_fee`), because the provider deducts it from the balance it holds for us. The seller's share is fixed at capture and is never touched; the platform's fee revenue is what bears the cost. Providers keep their fee on a refund, so refunds do not reverse it.
 - The fee is booked in the capture's own transaction when the provider already knows it (Razorpay's capture response `fee`, which includes GST; Stripe's expanded `latest_charge.balance_transaction`; `SIMULATED_FEE_BPS` + `SIMULATED_FEE_FIXED_MINOR` for the simulator, default none). Stripe creates the balance transaction asynchronously, so it is often not there yet: reconciliation then books it from the provider's own listing, once and without raising anything. A fee that is absent, malformed or in another currency than the payment is never guessed.
 - Reconciliation also compares the booked fee with the provider's, and a difference is a `fee_mismatch` item (only once the charge amounts agree). `POST /reports/reconciliation/items/:id/book-fee` makes the ledger equal the provider's figure by posting the difference as a `provider_fee_adjustment` entry (every correction is its own entry, so any number of them is safe); or ignore it with a note.
-- `GET /reports/margin?from=&to=` (admin) shows, per currency, platform fee revenue (net of fee returned on refunds and lost disputes), provider fees, and the net margin.
+- A dispute fee (Stripe attaches it to the dispute's balance transactions; only fees in the dispute's currency count) is booked when the dispute opens as `Dr platform:provider_fees / Cr platform:clearing` (kind `dispute_fee`, once per dispute). It is the platform's cost: the seller's holds and the dispute outcome are unaffected, and a fee the provider later returns is not modelled. Razorpay reports no dispute fee, so none is booked for it.
+- Refunds and payouts need no fee entry: the providers keep the processing fee on a refund (already the case above), and Stripe Connect transfers carry no fee.
+- `GET /reports/margin?from=&to=` (admin) shows, per currency, platform fee revenue (net of fee returned on refunds and lost disputes), provider fees (processing and dispute fees), and the net margin.
 
 **Payouts and reconciliation**
 - Payable = credits older than the hold period − all debits − reserve, floored at zero. Concurrent batches serialize on the seller's balance row.
@@ -303,7 +305,6 @@ Auth: `API_KEYS`, `API_KEY_CACHE_TTL_MS`, `ALLOW_UNAUTHENTICATED`. Process: `APP
 ## Next steps
 
 - Multi-currency payouts and FX postings (a Stripe fee in a settlement currency other than the payment's is deliberately ignored today); per-seller reserve policies
-- Provider fees on refunds, disputes and payouts (only the processing fee on a charge is booked)
 - Per-tenant API keys scoped to a seller or client (keys today carry a role, not a tenant)
 
 ## License
