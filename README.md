@@ -29,7 +29,51 @@ If you changed the ports, export matching `DATABASE_URL` / `REDIS_URL` (see `.en
 
 `npm run demo` charges two buyers, splits the fee, refunds part of one payment, shows the payout hold, pays the seller out, then runs reconciliation, first clean, then after tampering with the provider's books so you can see the mismatch report.
 
+### Try it by hand
+
+With the API running (`npm run start:dev`; authentication is off locally) the same story works with `curl`. The simulated provider delivers its own webhooks, so there is nothing else to set up.
+
+```bash
+B=localhost:3000; H='content-type: application/json'
+
+# 1. A buyer pays 100.00; the platform keeps 10% and the seller is owed 90.00
+curl -s -X POST $B/payments -H "$H" -H 'Idempotency-Key: demo-1' \
+  -d '{"buyerId":"buyer_1","sellerId":"acme_bikes","amount":10000,"currency":"USD","capture":true}'
+# Repeat the exact same call: same payment, header Idempotent-Replayed: true. A different body with the same key: 409.
+
+# 2. Refund 25.00 (use the "id" from step 1); the fee is returned pro rata
+curl -s -X POST $B/payments/<id>/refunds -H "$H" -H 'Idempotency-Key: demo-r1' -d '{"amount":2500}'
+
+# 3. The seller's money is on hold for PAYOUT_HOLD_DAYS (default 2); pretend three days have passed and pay out
+curl -s $B/sellers/acme_bikes/balance
+curl -s -X POST $B/payouts/run -H "$H" -d '{"asOf":"<a timestamp three days from now, ISO-8601>"}'
+
+# 4. Check the books: every posting sums to zero, cached balances match, and what the platform kept
+curl -s $B/ledger/trial-balance
+curl -s $B/reports/margin
+curl -s "$B/reports/reconciliation?date=$(date -u +%F)"   # provider's books vs ours
+```
+
+Every route is also in the Swagger UI at `/docs`.
+
 ## Flows
+
+### Architecture at a glance
+
+```mermaid
+flowchart LR
+    C[Client] -->|REST + Idempotency-Key| API[API process]
+    PRV[Provider: Stripe / Razorpay / simulated] -->|signed webhooks| API
+    API -->|short transactions| PG[(Postgres: ledger, payments, outbox, webhook events)]
+    API -->|enqueue| RQ[(Redis: BullMQ queues, shared rate limits)]
+    RQ --> W[Worker process]
+    W -->|provider calls, outside any DB transaction| PRV
+    W -->|apply results, post ledger entries| PG
+    W -.->|alerts| WH[Alert webhook]
+    API & W -.->|spans + metrics| OBS[OTLP collector / Prometheus]
+```
+
+`APP_ROLE=api` serves HTTP only, `worker` runs the queue workers and schedulers (payout batches, recovery, reconciliation, retention, monitoring), `all` (default) does both in one process.
 
 ### Charge flow
 
