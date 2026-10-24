@@ -39,11 +39,13 @@
 - [x] **T26** Operator workflow for mismatches: list / get / ignore (with a required note) / reopen, alerts only on new items plus a stale-item alert, open-item metrics, and nightly reconciliation of every configured provider
 - [x] **T27** Provider fee accounting: record the fee Stripe / Razorpay / the simulator charge on each capture as a ledger expense, and a margin report (platform fee revenue minus provider fees)
 
-## Phase 6: Next up
+## Phase 6: Wrap-up and optional extras
+T28 and T29 are done. The demo project is considered feature-complete; the rest is deliberately not planned for the demo and would only matter for a real deployment.
+
 - [x] **T28** Provider fees beyond captures: the provider's dispute fee is booked when a dispute opens (`dispute_fee`, parsed from Stripe's dispute balance transactions, in the margin report); refunds and payouts need no entry (providers keep the processing fee on a refund, Stripe Connect transfers carry no fee)
 - [x] **T29** Reconciliation item retention: purge resolved / ignored `reconciliation_items` after a configurable age, keeping open items
-- [ ] **T30** Scoped API keys: per-key permissions (for example payments:write, ledger:read, payouts:run) instead of just admin / non-admin, enforced on every route and managed through the key endpoints
-- [ ] **T31** Multi-currency and FX: per-currency ledger balances, FX rate source and conversion postings, and multi-currency payouts and margin reporting
-- [ ] **T32** Kubernetes manifests: api and worker deployments, probes, HPA, config and secrets, alongside the existing Dockerfile
-- [ ] **T33** Move the test runner from Jest to Vitest, dropping the Node 24 / `--experimental-vm-modules` requirement for tests
-- [ ] **T34** Stripe and Razorpay live testing against test-mode accounts (blocked until test API keys are available)
+- [ ] **T30** (optional, post-demo) Scoped API keys: per-key permissions (for example payments:write, ledger:read, payouts:run) instead of just admin / non-admin, enforced on every route and managed through the key endpoints
+- [ ] **T31** (optional, post-demo) Multi-currency and FX: per-currency ledger balances, FX rate source and conversion postings, and multi-currency payouts and margin reporting
+- [ ] **T32** (optional, post-demo) Kubernetes manifests: api and worker deployments, probes, HPA, config and secrets, alongside the existing Dockerfile
+- [ ] **T33** (optional, post-demo) Move the test runner from Jest to Vitest, dropping the Node 24 / `--experimental-vm-modules` requirement for tests
+- [ ] **T34** (blocked) Stripe and Razorpay live testing against test-mode accounts (blocked until test API keys are available)
