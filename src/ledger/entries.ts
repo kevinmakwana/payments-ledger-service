@@ -29,6 +29,9 @@ export function providerFeeLines(p: { currency: string; amount: number }): Posti
   return [debit(providerFees(p.currency), p.amount), credit(clearing(p.currency), p.amount)];
 }
 
+/** The fee a provider charges for handling a dispute: a cost of the platform, taken from the provider balance like a processing fee. */
+export const disputeFeeLines = providerFeeLines;
+
 /** Moves the booked provider fee by `delta` (positive: the provider charged more than booked; negative: less). */
 export function providerFeeAdjustmentLines(p: { currency: string; delta: number }): PostingLine[] {
   return p.delta > 0

@@ -44,6 +44,19 @@ describe('StripeProvider webhook mapping (disputes and failures)', () => {
     });
   });
 
+  it('reads the dispute fee from the dispute balance transactions, counting only the dispute currency', () => {
+    const balance_transactions = [
+      { type: 'adjustment', amount: -5000, fee: 1500, currency: 'usd' },
+      { type: 'adjustment', amount: -100, fee: 200, currency: 'eur' },
+    ];
+    expect(parse('charge.dispute.created', { ...dispute, status: 'needs_response', balance_transactions })).toMatchObject({ data: { fee: 1500 } });
+  });
+
+  it('reports no dispute fee when Stripe attaches none', () => {
+    const e = parse('charge.dispute.created', { ...dispute, status: 'needs_response', balance_transactions: [] });
+    expect(e.data).not.toHaveProperty('fee');
+  });
+
   it.each([
     ['won', 'dispute.won'],
     ['lost', 'dispute.lost'],

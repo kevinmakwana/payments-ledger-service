@@ -40,7 +40,7 @@
 - [x] **T27** Provider fee accounting: record the fee Stripe / Razorpay / the simulator charge on each capture as a ledger expense, and a margin report (platform fee revenue minus provider fees)
 
 ## Phase 6: Next up
-- [ ] **T28** Provider fees on refunds, disputes and payouts: today only captures book the provider fee, so Stripe / Razorpay fees on disputes (and any non-refunded fee on refunds) never reach the ledger or the margin report
+- [x] **T28** Provider fees beyond captures: the provider's dispute fee is booked when a dispute opens (`dispute_fee`, parsed from Stripe's dispute balance transactions, in the margin report); refunds and payouts need no entry (providers keep the processing fee on a refund, Stripe Connect transfers carry no fee)
 - [x] **T29** Reconciliation item retention: purge resolved / ignored `reconciliation_items` after a configurable age, keeping open items
 - [ ] **T30** Scoped API keys: per-key permissions (for example payments:write, ledger:read, payouts:run) instead of just admin / non-admin, enforced on every route and managed through the key endpoints
 - [ ] **T31** Multi-currency and FX: per-currency ledger balances, FX rate source and conversion postings, and multi-currency payouts and margin reporting
