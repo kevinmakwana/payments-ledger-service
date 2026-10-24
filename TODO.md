@@ -41,7 +41,7 @@
 
 ## Phase 6: Next up
 - [ ] **T28** Provider fees on refunds, disputes and payouts: today only captures book the provider fee, so Stripe / Razorpay fees on disputes (and any non-refunded fee on refunds) never reach the ledger or the margin report
-- [ ] **T29** Reconciliation item retention: purge resolved / ignored `reconciliation_items` after a configurable age, keeping open items
+- [x] **T29** Reconciliation item retention: purge resolved / ignored `reconciliation_items` after a configurable age, keeping open items
 - [ ] **T30** Scoped API keys: per-key permissions (for example payments:write, ledger:read, payouts:run) instead of just admin / non-admin, enforced on every route and managed through the key endpoints
 - [ ] **T31** Multi-currency and FX: per-currency ledger balances, FX rate source and conversion postings, and multi-currency payouts and margin reporting
 - [ ] **T32** Kubernetes manifests: api and worker deployments, probes, HPA, config and secrets, alongside the existing Dockerfile
