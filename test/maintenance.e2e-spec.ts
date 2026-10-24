@@ -5,7 +5,7 @@ describeE2E('retention (e2e, real Postgres)', () => {
   let t: TestApp;
   beforeAll(async () => {
     // TTL 24h, retention 30 days (explicit, so the suite does not depend on defaults)
-    t = await startApp({ IDEMPOTENCY_KEY_TTL_HOURS: '24', WEBHOOK_RETENTION_DAYS: '30' });
+    t = await startApp({ IDEMPOTENCY_KEY_TTL_HOURS: '24', WEBHOOK_RETENTION_DAYS: '30', RECONCILIATION_ITEM_RETENTION_DAYS: '90' });
   });
   beforeEach(async () => {
     await t.drain();
@@ -15,6 +15,7 @@ describeE2E('retention (e2e, real Postgres)', () => {
     await t.close();
     delete process.env.IDEMPOTENCY_KEY_TTL_HOURS;
     delete process.env.WEBHOOK_RETENTION_DAYS;
+    delete process.env.RECONCILIATION_ITEM_RETENTION_DAYS;
   });
 
   const purge = (batchSize?: number) => t.app.get(MaintenanceService).purge(batchSize);
@@ -46,6 +47,23 @@ describeE2E('retention (e2e, real Postgres)', () => {
     expect(await events()).toEqual(['old-dead', 'old-received', 'recent-processed']);
   });
 
+  it('deletes only OLD CLOSED reconciliation items; open ones are kept however old', async () => {
+    const item = (ref: string, status: string, age: string) =>
+      t.db.query(
+        `INSERT INTO reconciliation_items (provider, kind, ref, date, type, currency, status, first_seen_at, resolved_at)
+         VALUES ('simulated', 'charge', $1, current_date, 'missing_in_ledger', 'USD', $2,
+                 now() - interval '${age}', CASE WHEN $2 = 'open' THEN NULL ELSE now() - interval '${age}' END)`,
+        [ref, status],
+      );
+    await item('old-resolved', 'resolved', '200 days');
+    await item('old-ignored', 'ignored', '120 days');
+    await item('recent-resolved', 'resolved', '10 days');
+    await item('old-open', 'open', '400 days');
+    expect((await purge()).reconciliationItems).toBe(2);
+    const refs = (await t.db.query('SELECT ref FROM reconciliation_items ORDER BY ref')).rows.map((r) => r.ref);
+    expect(refs).toEqual(['old-open', 'recent-resolved']);
+  });
+
   it('works through large backlogs in batches', async () => {
     for (let i = 0; i < 7; i++) await idemKey(`bulk-${i}`, '10 days');
     expect((await purge(2)).idempotencyKeys).toBe(7);
@@ -53,7 +71,7 @@ describeE2E('retention (e2e, real Postgres)', () => {
   });
 
   it('does nothing on a clean database', async () => {
-    expect(await purge()).toEqual({ idempotencyKeys: 0, webhookEvents: 0 });
+    expect(await purge()).toEqual({ idempotencyKeys: 0, webhookEvents: 0, reconciliationItems: 0 });
   });
 
   it('does not remove the key of a request that is still replaying (recent real payment)', async () => {

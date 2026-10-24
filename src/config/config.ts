@@ -44,6 +44,8 @@ export interface AppConfig {
   idempotencyKeyTtlHours: number;
   /** Processed webhook events older than this are deleted (received and dead-lettered events are never purged). */
   webhookRetentionDays: number;
+  /** Resolved and ignored reconciliation items older than this are deleted (open items are never purged). */
+  reconciliationItemRetentionDays: number;
   /** The nightly reconciliation re-checks this many days ending yesterday, so a late webhook closes yesterday's open items by itself. */
   reconciliationLookbackDays: number;
   /** An open reconciliation item older than this raises a `reconciliation_item_stale` alert every night until someone resolves or ignores it. */
@@ -151,6 +153,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     authorizationTtlHours: int(env.AUTHORIZATION_TTL_HOURS, 168),
     idempotencyKeyTtlHours: int(env.IDEMPOTENCY_KEY_TTL_HOURS, 168),
     webhookRetentionDays: int(env.WEBHOOK_RETENTION_DAYS, 30),
+    reconciliationItemRetentionDays: Math.max(1, int(env.RECONCILIATION_ITEM_RETENTION_DAYS, 180)),
     reconciliationLookbackDays: Math.max(1, int(env.RECONCILIATION_LOOKBACK_DAYS, 3)),
     reconciliationStaleDays: Math.max(1, int(env.RECONCILIATION_STALE_DAYS, 3)),
     maintenanceCron: env.MAINTENANCE_CRON || '0 4 * * *',
