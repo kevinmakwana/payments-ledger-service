@@ -58,10 +58,16 @@ jobs:
         run: npm run build
       - name: Offline demo
         run: npm run demo
+      - name: Kubernetes manifests are valid
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          kubectl kustomize deploy/k8s | ./kubeconform -strict -summary -kubernetes-version 1.31.0
+          ./kubeconform -strict -summary -kubernetes-version 1.31.0 deploy/k8s/secret.example.yaml
       - name: Docker image builds and boots
         run: |
           docker build -t payments-ledger-service:ci .
-          docker run -d --name app --network host \
+          # Same restrictions as deploy/k8s: read-only root filesystem (writable /tmp), no capabilities.
+          docker run -d --name app --network host --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
             -e NODE_ENV=production -e API_KEYS=sk_admin_ci_0123456789abcdef:admin \
             -e DATABASE_URL -e REDIS_URL -e PORT=3055 -e QUEUE_PREFIX=ci-smoke \
             payments-ledger-service:ci

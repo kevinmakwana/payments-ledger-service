@@ -1,0 +1,17 @@
+# The worker's port is not an API: only pods of this namespace may reach it. (Add your monitoring namespace to
+# `from` if Prometheus runs elsewhere.) Needs a CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ledger-worker-internal-only
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: payments-ledger-service
+      app.kubernetes.io/component: worker
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 3001 }

@@ -1,0 +1,15 @@
+# Non-secret settings shared by both tiers. Secrets (database, Redis, API keys, provider credentials) come from
+# the `ledger-secrets` Secret, see secret.example.yaml. Every variable is documented in .env.example.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledger-config
+  labels:
+    app.kubernetes.io/name: payments-ledger-service
+data:
+  NODE_ENV: production
+  DEFAULT_PROVIDER: simulated      # stripe | razorpay once the provider credentials are in the Secret
+  RATE_LIMIT_STORE: redis          # one limit across all API replicas
+  TRUST_PROXY: "1"                 # reverse-proxy hops in front of the API (the Ingress controller)
+  # The simulated provider (demo/staging only) posts its webhooks here, from whichever tier calls it.
+  SIMULATED_WEBHOOK_BASE_URL: http://ledger-api

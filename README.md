@@ -277,7 +277,19 @@ docker compose -f deploy/docker-compose.prod.yml --env-file deploy/prod.env up -
 
 [deploy/docker-compose.prod.yml](deploy/docker-compose.prod.yml) is a production-shaped stack: `api` and `worker` services, Postgres and Redis with persistent volumes (Redis with AOF and a password, because queue state and schedules live there), required secrets enforced at `up` time, nothing but the API published. `NODE_ENV=production` makes the app refuse to start without `API_KEYS` and switches logs to JSON. This stack was built and exercised end to end (payment, worker-processed webhook, worker-dispatched payout, balanced ledger, worker port unreachable from the host).
 
-For an orchestrator: liveness `GET /health/live` and readiness `GET /health/ready` on `PORT` for `api`, and on `WORKER_PORT` for `worker`; give `worker` a longer termination grace period than `api` (in-flight jobs finish on SIGTERM); terminate TLS and put a load balancer in front of `api`, and set `TRUST_PROXY` to the number of proxy hops. Kubernetes manifests are not included because they could not be validated here. Behind separate processes the simulated provider needs `SIMULATED_WEBHOOK_BASE_URL` (the compose file sets it); real providers deliver to your public webhook URL and need nothing.
+For an orchestrator: liveness `GET /health/live` and readiness `GET /health/ready` on `PORT` for `api`, and on `WORKER_PORT` for `worker`; give `worker` a longer termination grace period than `api` (in-flight jobs finish on SIGTERM); terminate TLS and put a load balancer in front of `api`, and set `TRUST_PROXY` to the number of proxy hops. Behind separate processes the simulated provider needs `SIMULATED_WEBHOOK_BASE_URL` (the compose file sets it); real providers deliver to your public webhook URL and need nothing.
+
+### Kubernetes
+
+[deploy/k8s](deploy/k8s) holds a kustomize base for the same two tiers: `ledger-api` (Deployment, Service, HPA, PodDisruptionBudget, Ingress) and `ledger-worker` (Deployment, internal Service, HPA, PodDisruptionBudget, NetworkPolicy). Both run the same image with `APP_ROLE` set, as the unprivileged `node` user with a read-only root filesystem and no capabilities; the API has a 30 s termination grace period, the worker 60 s so in-flight jobs finish. Liveness (`/health/live`) never touches Postgres or Redis, readiness (`/health/ready`) does, and a startup probe leaves room for migrations. Postgres and Redis are expected to be managed services, reached through the `ledger-secrets` Secret ([secret.example.yaml](deploy/k8s/secret.example.yaml); it is not part of the kustomization so no secret is ever applied by accident).
+
+```bash
+kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply -f my-secret.yaml            # from deploy/k8s/secret.example.yaml, with real values
+kubectl apply -k deploy/k8s                # set the image with `images:` in deploy/k8s/kustomization.yaml
+```
+
+CI renders the manifests with `kubectl kustomize` and validates them against the Kubernetes 1.31 schemas with kubeconform, and the Docker smoke test runs the image with the same read-only, no-capability restrictions. What has **not** been done is applying them to a real cluster, so adjust the Ingress class and host, resource sizes and the HPA targets to your environment.
 
 ## Operations
 

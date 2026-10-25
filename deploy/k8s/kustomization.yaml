@@ -1,0 +1,17 @@
+# Render with `kubectl kustomize deploy/k8s`, apply with `kubectl apply -k deploy/k8s`.
+# Create the Secret first (see secret.example.yaml); Postgres and Redis are expected to be managed services.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: payments-ledger
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - api.yaml
+  - worker.yaml
+  - networkpolicy.yaml
+  - ingress.yaml
+# Point both tiers at the image you built and pushed (one image, APP_ROLE picks the tier).
+images:
+  - name: payments-ledger-service
+    newName: payments-ledger-service
+    newTag: latest

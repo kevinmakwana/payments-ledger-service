@@ -1,0 +1,111 @@
+# Worker tier: BullMQ workers and schedulers only (APP_ROLE=worker): webhook processing, payouts, reconciliation,
+# monitoring, retention and payment recovery. It is not an API; its port serves probes and /metrics inside the cluster.
+# Safe to scale out: jobs are distributed by BullMQ, scheduled jobs fire once per tick however many workers run,
+# and every operation is idempotent and claimed with a lease.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-worker
+  labels: &labels
+    app.kubernetes.io/name: payments-ledger-service
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels: *labels
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      terminationGracePeriodSeconds: 60   # in-flight jobs finish on SIGTERM, so longer than the API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: payments-ledger-service
+          ports:
+            - { name: probe, containerPort: 3001 }
+          env:
+            - { name: APP_ROLE, value: worker }
+            - { name: WORKER_PORT, value: "3001" }
+          envFrom:
+            - configMapRef: { name: ledger-config }
+            - secretRef: { name: ledger-secrets }
+          startupProbe:
+            httpGet: { path: /health/live, port: probe }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /health/live, port: probe }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /health/ready, port: probe }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: *labels
+---
+# Internal only: for Prometheus (scrape /metrics with an admin API key, since API_KEYS is set) and nothing else.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-worker
+  labels:
+    app.kubernetes.io/name: payments-ledger-service
+    app.kubernetes.io/component: worker
+spec:
+  selector:
+    app.kubernetes.io/name: payments-ledger-service
+    app.kubernetes.io/component: worker
+  ports:
+    - { name: probe, port: 3001, targetPort: probe }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ledger-worker
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ledger-worker }
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600   # queue bursts come in waves: scale down slowly so in-flight work finishes
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ledger-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payments-ledger-service
+      app.kubernetes.io/component: worker

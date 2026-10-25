@@ -1,0 +1,114 @@
+# API tier: HTTP only (APP_ROLE=api). It queues work but processes none. Scales with request volume.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-api
+  labels: &labels
+    app.kubernetes.io/name: payments-ledger-service
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels: *labels
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000   # the image's unprivileged `node` user
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: payments-ledger-service
+          ports:
+            - { name: http, containerPort: 3000 }
+          env:
+            - { name: APP_ROLE, value: api }
+            - { name: PORT, value: "3000" }
+          envFrom:
+            - configMapRef: { name: ledger-config }
+            - secretRef: { name: ledger-secrets }
+          # Migrations run at startup (under a Postgres advisory lock), so allow up to a minute before liveness applies.
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          # Liveness never touches dependencies: a Postgres or Redis outage must not restart healthy pods.
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          # Readiness does: a pod that cannot reach Postgres and Redis is taken out of the Service.
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          lifecycle:
+            preStop:
+              # Let the endpoint removal reach the load balancer before SIGTERM starts the graceful shutdown.
+              exec: { command: ["sleep", "5"] }
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: *labels
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-api
+  labels:
+    app.kubernetes.io/name: payments-ledger-service
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    app.kubernetes.io/name: payments-ledger-service
+    app.kubernetes.io/component: api
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ledger-api
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ledger-api }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # avoid flapping after a burst
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ledger-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payments-ledger-service
+      app.kubernetes.io/component: api

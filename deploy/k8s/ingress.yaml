@@ -1,0 +1,21 @@
+# TLS terminates here. TRUST_PROXY=1 (ConfigMap) matches this single hop, so rate limits see real client IPs.
+# Adjust the class, host and TLS secret to your cluster. Provider webhooks (POST /webhooks/:provider) arrive through this host too.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ledger-api
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [ledger.example.com]
+      secretName: ledger-tls
+  rules:
+    - host: ledger.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ledger-api
+                port: { name: http }
