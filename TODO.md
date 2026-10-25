@@ -46,6 +46,6 @@ T28 and T29 are done. The demo project is considered feature-complete; the rest 
 - [x] **T29** Reconciliation item retention: purge resolved / ignored `reconciliation_items` after a configurable age, keeping open items
 - [ ] **T30** (optional, post-demo) Scoped API keys: per-key permissions (for example payments:write, ledger:read, payouts:run) instead of just admin / non-admin, enforced on every route and managed through the key endpoints
 - [ ] **T31** (optional, post-demo) Multi-currency and FX: per-currency ledger balances, FX rate source and conversion postings, and multi-currency payouts and margin reporting
-- [ ] **T32** (optional, post-demo) Kubernetes manifests: api and worker deployments, probes, HPA, config and secrets, alongside the existing Dockerfile
+- [x] **T32** Kubernetes manifests (`deploy/k8s`, kustomize): api and worker deployments, probes, HPA, PodDisruptionBudgets, NetworkPolicy, Ingress, config and an example Secret; validated in CI with kubeconform, not applied to a real cluster
 - [ ] **T33** (optional, post-demo) Move the test runner from Jest to Vitest, dropping the Node 24 / `--experimental-vm-modules` requirement for tests
 - [ ] **T34** (blocked) Stripe and Razorpay live testing against test-mode accounts (blocked until test API keys are available)
