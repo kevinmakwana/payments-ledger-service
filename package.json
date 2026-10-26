@@ -31,7 +31,7 @@
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.223.0",
     "@opentelemetry/instrumentation-pg": "^0.76.0",
-    "@opentelemetry/sdk-node": "^0.223.0",
+    "@opentelemetry/sdk-node": "^0.300.0",
     "bullmq": "^6.4.0",
     "bullmq-otel": "^2.0.1",
     "class-transformer": "^0.5.1",
