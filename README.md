@@ -340,7 +340,7 @@ DATABASE_URL=postgres://ledger:ledger@localhost:5442/ledger REDIS_URL=redis://lo
 
 ## Dependency audit
 
-`npm audit --omit=dev` is clean. `@nestjs/swagger@11.4.7` pins `js-yaml` 5.3.0, which has a moderate advisory (GHSA-r3ph-w7gj-g6xm, CPU use when *parsing* YAML merge keys). Swagger only calls `dump` on our own OpenAPI document, so it is not reachable, but `overrides` in `package.json` moves that one dependency to the patched 5.5.0 anyway, without the breaking Nest 12 upgrade `npm audit fix --force` would require. Drop the override when Swagger bumps its pin. The remaining `npm audit` findings are `js-yaml` 3.x inside Jest's coverage tooling (dev only, reads this repo's own config, no 3.x fix exists).
+`npm audit` is clean, including dev dependencies. One override keeps it that way: `overrides` in `package.json` pins `multer` (pulled in by `@nestjs/platform-express`, which this API does not use for uploads) to the patched 2.5.0 because Nest's own pin, 2.4.0, has a denial-of-service advisory (GHSA-q7qp-rjg7-q26m); drop the override when Nest bumps its pin. CI does not gate on `npm audit`, so run it before a release.
 
 ## Providers
 
