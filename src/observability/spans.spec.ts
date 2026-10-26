@@ -1,7 +1,7 @@
 import { context as otelContext, propagation, trace } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
-import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace';
 import { startFakeHttp, FakeHttp, respondJson } from '../../test/fake-http';
 import { providerRequest } from '../providers/http';
 import { newContext, runWithContext, traceHeaders } from './request-context';
@@ -13,7 +13,7 @@ const finished = () => exporter.getFinishedSpans();
 beforeAll(() => {
   otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
   propagation.setGlobalPropagator(new W3CTraceContextPropagator());
-  trace.setGlobalTracerProvider(new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }));
+  trace.setGlobalTracerProvider(new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] }));
 });
 beforeEach(() => exporter.reset());
 afterAll(() => {

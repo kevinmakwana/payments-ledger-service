@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # The OpenTelemetry packages pin each other's versions (and the API's), so they only upgrade together.
+      # Listed before dev-tooling so the dev-only ones (context-async-hooks, sdk-trace, core) join this group.
+      opentelemetry:
+        patterns: ["@opentelemetry/*"]
       nestjs:
         patterns: ["@nestjs/*"]
       dev-tooling:
